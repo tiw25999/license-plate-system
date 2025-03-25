@@ -12,7 +12,8 @@ app = FastAPI(title="License Plate API")
 # เพิ่ม CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # ในโปรดักชันควรจำกัดเฉพาะโดเมนที่อนุญาต
+    allow_origins=["https://license-plate-web-production.up.railway.app",
+    "http://localhost:3000"],  # สำหรับการพัฒนาในเครื่อง  # ในโปรดักชันควรจำกัดเฉพาะโดเมนที่อนุญาต
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
