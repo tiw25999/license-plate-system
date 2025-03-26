@@ -52,7 +52,7 @@ async def add_plate_route(plate_number: str):
 
 @plates_router.get("/get_plates", response_model=List[PlateModel])
 async def fetch_plates(plate_number: Optional[str] = Query(None)):
-    """ดึงข้อมูลทะเบียนตามเลขทะเบียน หรือดึงทั้งหมด 5000 รายการล่าสุดถ้าไม่ระบุ"""
+    """ดึงข้อมูลทะเบียนตามเลขทะเบียน หรือดึงทั้งหมด 1000 รายการล่าสุดถ้าไม่ระบุ"""
     try:
         if plate_number:
             result = await get_plate(plate_number)
@@ -79,10 +79,10 @@ async def fetch_plates(plate_number: Optional[str] = Query(None)):
 async def search_plates_route(search_params: SearchParams):
     """
     ค้นหาทะเบียนตามเงื่อนไขต่างๆ:
-    - ค้นหาทะเบียนที่คล้ายกัน เช่น "ABC" (จะได้ ABC0001, ABC1234, ฯลฯ)
-    - ค้นหาตามช่วงวันที่ เช่น วันที่ 01/01/2023 ถึง 31/12/2023
-    - ค้นหาตามช่วงเดือน เช่น เดือน 1 ปี 2023 ถึง เดือน 12 ปี 2023
-    - ค้นหาตามช่วงปี เช่น ปี 2020 ถึง 2023
+    - ค้นหาทะเบียนที่มีตัวอักษรหรือตัวเลขที่ต้องการปรากฏอยู่ (ไม่จำเป็นต้องขึ้นต้น)
+    - ค้นหาตามช่วงวันที่ เช่น วันที่ 01/01/1990 ถึง 31/12/2023
+    - ค้นหาตามช่วงเดือน เช่น เดือน 1 ปี 1990 ถึง เดือน 12 ปี 2023
+    - ค้นหาตามช่วงปี เช่น ปี 1990 ถึง 2023
     """
     try:
         # ตรวจสอบความถูกต้องของรูปแบบวันที่
@@ -161,18 +161,18 @@ async def search_plates_route(search_params: SearchParams):
 
 @plates_router.get("/search", response_model=List[PlateModel])
 async def search_plates_get(
-    search_term: Optional[str] = Query(None, description="คำค้นหาสำหรับทะเบียนรถ เช่น 'ABC'"),
+    search_term: Optional[str] = Query(None, description="คำค้นหาสำหรับทะเบียนรถ เช่น 'A', '123'"),
     start_date: Optional[str] = Query(None, description="วันที่เริ่มต้นในรูปแบบ DD/MM/YYYY"),
     end_date: Optional[str] = Query(None, description="วันที่สิ้นสุดในรูปแบบ DD/MM/YYYY"),
     start_month: Optional[str] = Query(None, description="เดือนเริ่มต้น (1-12)"),
     end_month: Optional[str] = Query(None, description="เดือนสิ้นสุด (1-12)"),
-    start_year: Optional[str] = Query(None, description="ปีเริ่มต้น (เช่น 2023)"),
+    start_year: Optional[str] = Query(None, description="ปีเริ่มต้น (เช่น 1990)"),
     end_year: Optional[str] = Query(None, description="ปีสิ้นสุด (เช่น 2023)"),
-    limit: int = Query(5000, ge=1, le=5000, description="จำนวนผลลัพธ์สูงสุด (1-5000)")
+    limit: int = Query(1000, ge=1, le=1000, description="จำนวนผลลัพธ์สูงสุด (1-1000)")
 ):
     """
     ค้นหาทะเบียนตามเงื่อนไขต่างๆด้วย GET method:
-    - ค้นหาทะเบียนที่คล้ายกัน (เช่น ABC)
+    - ค้นหาทะเบียนที่มีตัวอักษรหรือตัวเลขที่ต้องการปรากฏอยู่ (ไม่จำเป็นต้องขึ้นต้น)
     - ค้นหาตามช่วงวันที่ เดือน ปี
     """
     # สร้าง SearchParams จาก query parameters
