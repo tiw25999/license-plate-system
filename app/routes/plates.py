@@ -25,7 +25,11 @@ class SearchParams(BaseModel):
     search_term: Optional[str] = Field(None, description="คำค้นหาสำหรับทะเบียนรถ เช่น 'ABC'")
     start_date: Optional[str] = Field(None, description="วันที่เริ่มต้นในรูปแบบ DD/MM/YYYY")
     end_date: Optional[str] = Field(None, description="วันที่สิ้นสุดในรูปแบบ DD/MM/YYYY")
-    limit: int = Field(500, ge=1, le=1000, description="จำนวนผลลัพธ์สูงสุด (1-1000)")
+    start_month: Optional[str] = Field(None, description="เดือนเริ่มต้น (1-12)")
+    end_month: Optional[str] = Field(None, description="เดือนสิ้นสุด (1-12)")
+    start_year: Optional[str] = Field(None, description="ปีเริ่มต้น (เช่น 2023)")
+    end_year: Optional[str] = Field(None, description="ปีสิ้นสุด (เช่น 2023)")
+    limit: int = Field(5000, ge=1, le=5000, description="จำนวนผลลัพธ์สูงสุด (1-5000)")
 
 @plates_router.post("/add_plate", response_model=PlateResponse)
 async def add_plate_route(plate_number: str):
@@ -48,7 +52,7 @@ async def add_plate_route(plate_number: str):
 
 @plates_router.get("/get_plates", response_model=List[PlateModel])
 async def fetch_plates(plate_number: Optional[str] = Query(None)):
-    """ดึงข้อมูลทะเบียนตามเลขทะเบียน หรือดึงทั้งหมดถ้าไม่ระบุ (จำกัด 500 รายการ)"""
+    """ดึงข้อมูลทะเบียนตามเลขทะเบียน หรือดึงทั้งหมด 5000 รายการล่าสุดถ้าไม่ระบุ"""
     try:
         if plate_number:
             result = await get_plate(plate_number)
@@ -75,32 +79,68 @@ async def fetch_plates(plate_number: Optional[str] = Query(None)):
 async def search_plates_route(search_params: SearchParams):
     """
     ค้นหาทะเบียนตามเงื่อนไขต่างๆ:
-    - ค้นหาทะเบียนที่คล้ายกัน (เช่น ค้นหา "ABC" จะได้ ABC0001, ABC1234, ฯลฯ)
-    - ค้นหาตามช่วงวันที่ (เช่น 01/12/2001 ถึง 31/12/2005)
-    - ผลลัพธ์จำกัดตามที่ระบุ (ค่าเริ่มต้น 500 รายการ)
+    - ค้นหาทะเบียนที่คล้ายกัน เช่น "ABC" (จะได้ ABC0001, ABC1234, ฯลฯ)
+    - ค้นหาตามช่วงวันที่ เช่น วันที่ 01/01/2023 ถึง 31/12/2023
+    - ค้นหาตามช่วงเดือน เช่น เดือน 1 ปี 2023 ถึง เดือน 12 ปี 2023
+    - ค้นหาตามช่วงปี เช่น ปี 2020 ถึง 2023
     """
     try:
-        # ตรวจสอบความถูกต้องของวันที่
+        # ตรวจสอบความถูกต้องของรูปแบบวันที่
         if search_params.start_date or search_params.end_date:
             date_pattern = r"^\d{2}/\d{2}/\d{4}$"
             
-            if search_params.start_date and not re.match(date_pattern, search_params.start_date):
-                raise HTTPException(status_code=400, detail="Start date must be in DD/MM/YYYY format")
+            if (search_params.start_date and not re.match(date_pattern, search_params.start_date)) or \
+               (search_params.end_date and not re.match(date_pattern, search_params.end_date)):
+                raise HTTPException(status_code=400, detail="รูปแบบวันที่ไม่ถูกต้อง ต้องเป็น DD/MM/YYYY")
                 
-            if search_params.end_date and not re.match(date_pattern, search_params.end_date):
-                raise HTTPException(status_code=400, detail="End date must be in DD/MM/YYYY format")
+            # ถ้ามีเพียงค่าใดค่าหนึ่ง ให้แจ้งเตือน
+            if bool(search_params.start_date) != bool(search_params.end_date):
+                raise HTTPException(status_code=400, detail="ต้องระบุทั้งวันที่เริ่มต้นและวันที่สิ้นสุด")
+        
+        # ตรวจสอบความถูกต้องของเดือนและปี
+        if search_params.start_month or search_params.end_month or search_params.start_year or search_params.end_year:
+            # ตรวจสอบว่ามีข้อมูลครบถ้วนหรือไม่
+            has_start_month = bool(search_params.start_month)
+            has_end_month = bool(search_params.end_month)
+            has_start_year = bool(search_params.start_year)
+            has_end_year = bool(search_params.end_year)
             
-            # ถ้ามีเฉพาะวันที่เริ่มต้นหรือวันที่สิ้นสุด ให้กำหนดอีกวันที่เป็นวันที่เดียวกัน
-            if search_params.start_date and not search_params.end_date:
-                search_params.end_date = search_params.start_date
-            elif search_params.end_date and not search_params.start_date:
-                search_params.start_date = search_params.end_date
+            # กรณีค้นหาตามช่วงเดือน
+            if has_start_month or has_end_month:
+                if not (has_start_month and has_end_month and has_start_year and has_end_year):
+                    raise HTTPException(status_code=400, detail="ต้องระบุทั้งเดือนและปีเริ่มต้น รวมถึงเดือนและปีสิ้นสุด")
+                
+                # ตรวจสอบความถูกต้องของค่าเดือน
+                try:
+                    start_month = int(search_params.start_month)
+                    end_month = int(search_params.end_month)
+                    
+                    if start_month < 1 or start_month > 12 or end_month < 1 or end_month > 12:
+                        raise HTTPException(status_code=400, detail="เดือนต้องเป็นตัวเลข 1-12")
+                except ValueError:
+                    raise HTTPException(status_code=400, detail="เดือนต้องเป็นตัวเลข 1-12")
+            
+            # กรณีค้นหาตามช่วงปี
+            elif has_start_year or has_end_year:
+                if not (has_start_year and has_end_year):
+                    raise HTTPException(status_code=400, detail="ต้องระบุทั้งปีเริ่มต้นและปีสิ้นสุด")
+                
+                # ตรวจสอบความถูกต้องของค่าปี
+                try:
+                    int(search_params.start_year)
+                    int(search_params.end_year)
+                except ValueError:
+                    raise HTTPException(status_code=400, detail="ปีต้องเป็นตัวเลข")
         
         # เรียกใช้ฟังก์ชันค้นหา
         results = await search_plates(
             search_term=search_params.search_term,
             start_date=search_params.start_date,
             end_date=search_params.end_date,
+            start_month=search_params.start_month,
+            end_month=search_params.end_month,
+            start_year=search_params.start_year,
+            end_year=search_params.end_year,
             limit=search_params.limit
         )
         
@@ -119,25 +159,31 @@ async def search_plates_route(search_params: SearchParams):
         logger.error(f"Error searching plates: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error searching plates: {str(e)}")
 
-# เพิ่ม endpoint สำหรับค้นหาด้วย URL พารามิเตอร์
 @plates_router.get("/search", response_model=List[PlateModel])
 async def search_plates_get(
     search_term: Optional[str] = Query(None, description="คำค้นหาสำหรับทะเบียนรถ เช่น 'ABC'"),
     start_date: Optional[str] = Query(None, description="วันที่เริ่มต้นในรูปแบบ DD/MM/YYYY"),
     end_date: Optional[str] = Query(None, description="วันที่สิ้นสุดในรูปแบบ DD/MM/YYYY"),
-    limit: int = Query(500, ge=1, le=1000, description="จำนวนผลลัพธ์สูงสุด (1-1000)")
+    start_month: Optional[str] = Query(None, description="เดือนเริ่มต้น (1-12)"),
+    end_month: Optional[str] = Query(None, description="เดือนสิ้นสุด (1-12)"),
+    start_year: Optional[str] = Query(None, description="ปีเริ่มต้น (เช่น 2023)"),
+    end_year: Optional[str] = Query(None, description="ปีสิ้นสุด (เช่น 2023)"),
+    limit: int = Query(5000, ge=1, le=5000, description="จำนวนผลลัพธ์สูงสุด (1-5000)")
 ):
     """
     ค้นหาทะเบียนตามเงื่อนไขต่างๆด้วย GET method:
-    - ค้นหาทะเบียนที่คล้ายกัน (เช่น ค้นหา "ABC" จะได้ ABC0001, ABC1234, ฯลฯ)
-    - ค้นหาตามช่วงวันที่ (เช่น 01/12/2001 ถึง 31/12/2005)
-    - ผลลัพธ์จำกัดตามที่ระบุ (ค่าเริ่มต้น 500 รายการ)
+    - ค้นหาทะเบียนที่คล้ายกัน (เช่น ABC)
+    - ค้นหาตามช่วงวันที่ เดือน ปี
     """
     # สร้าง SearchParams จาก query parameters
     search_params = SearchParams(
         search_term=search_term,
         start_date=start_date,
         end_date=end_date,
+        start_month=start_month,
+        end_month=end_month,
+        start_year=start_year,
+        end_year=end_year,
         limit=limit
     )
     
