@@ -242,18 +242,42 @@ async def get_plates():
         loop = asyncio.get_event_loop()
         response = await loop.run_in_executor(
             None, 
-            lambda: supabase_client.table("plates").select("*").order('timestamp', desc=True).limit(MAX_RECORDS).execute()
+            lambda: supabase_client.table("plates").select("*").limit(MAX_RECORDS).execute()
         )
         
         # บันทึกเวลาการเข้าถึงฐานข้อมูลล่าสุด
         last_db_access = time.time()
         
-        # เก็บผลลัพธ์ใน cache
+        # เก็บผลลัพธ์
         result = response.data if response.data else []
-        all_plates_cache['all_plates'] = result
         
-        logger.info(f"Retrieved all plates, count: {len(result)}")
-        return result
+        # เรียงลำดับข้อมูลตามปี เดือน วัน (จากมากไปน้อย)
+        def parse_timestamp(timestamp_str):
+            try:
+                # แยกวันที่และเวลา
+                date_part = timestamp_str.split(' ')[0] if ' ' in timestamp_str else timestamp_str
+                
+                # แยกวัน เดือน ปี
+                day, month, year = map(int, date_part.split('/'))
+                
+                # สร้าง tuple สำหรับการเรียงลำดับ (ปี, เดือน, วัน)
+                return (year, month, day)
+            except (ValueError, IndexError, AttributeError):
+                # กรณีที่เกิดข้อผิดพลาดในการแยกวันที่
+                return (0, 0, 0)  # ค่าเริ่มต้นถ้าไม่สามารถแยกข้อมูลได้
+        
+        # เรียงลำดับข้อมูลโดยใช้ปี เดือน วัน (จากมากไปน้อย)
+        sorted_result = sorted(
+            result, 
+            key=lambda x: parse_timestamp(x.get('timestamp', '')), 
+            reverse=True  # เรียงจากมากไปน้อย
+        )
+        
+        # เก็บผลลัพธ์ที่เรียงลำดับแล้วใน cache
+        all_plates_cache['all_plates'] = sorted_result
+        
+        logger.info(f"Retrieved all plates, count: {len(sorted_result)}")
+        return sorted_result
     except Exception as e:
         logger.error(f"Supabase Get Plates Error: {e}")
         return []
