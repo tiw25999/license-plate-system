@@ -28,25 +28,47 @@ min_db_access_interval = 0.1  # ขั้นต่ำ 100ms ระหว่า�
 # จำนวนรายการที่ดึงจาก DB มากสุด (ลดลงเหลือ 1000 รายการ)
 MAX_RECORDS = 1000
 
-# ฟังก์ชันสำหรับแปลงรูปแบบวันที่ไทยเป็น timestamp
+# แปลงวันที่ไทยเป็น datetime object พร้อม timezone
 def parse_thai_date(date_str):
-    """แปลงวันที่รูปแบบไทย (DD/MM/YYYY) เป็น datetime object"""
+    """แปลงวันที่รูปแบบไทย (DD/MM/YYYY) เป็น datetime object พร้อม timezone"""
     try:
         day, month, year = date_str.split('/')
-        return datetime(int(year), int(month), int(day))
+        # สร้าง datetime object พร้อม timezone
+        thailand_tz = pytz.timezone('Asia/Bangkok')
+        dt = datetime(int(year), int(month), int(day), tzinfo=thailand_tz)
+        return dt
     except Exception as e:
         logger.error(f"Error parsing date: {date_str}, {e}")
         return None
+
+# เพิ่มฟังก์ชันใหม่สำหรับแปลง timestamp เป็นรูปแบบไทย
+def format_timestamp_thai(timestamp):
+    """แปลง timestamp เป็นรูปแบบไทย DD/MM/YYYY HH:MM:SS"""
+    if not timestamp:
+        return "-"
+    
+    # ถ้าเป็น string ให้แปลงเป็น datetime ก่อน
+    if isinstance(timestamp, str):
+        try:
+            timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        except Exception as e:
+            logger.error(f"Error converting timestamp string: {e}")
+            return timestamp
+    
+    # แปลงเป็น timezone ไทย
+    thailand_tz = pytz.timezone('Asia/Bangkok')
+    local_dt = timestamp.astimezone(thailand_tz)
+    
+    # แปลงเป็นรูปแบบสตริง DD/MM/YYYY HH:MM:SS
+    return local_dt.strftime("%d/%m/%Y %H:%M:%S")
 
 async def add_plate(plate_number, timestamp=None):
     """เพิ่มทะเบียนไปที่ Supabase ด้วย async"""
     global last_db_access
     
-    if timestamp is None:
-        # สร้าง timestamp ในรูปแบบไทย
-        thailand_tz = pytz.timezone('Asia/Bangkok')
-        now = datetime.now(thailand_tz)
-        timestamp = now.strftime("%d/%m/%Y %H:%M:%S")  # Thai format for display
+    # สร้าง timestamp ในรูปแบบที่ถูกต้อง
+    thailand_tz = pytz.timezone('Asia/Bangkok')
+    now = datetime.now(thailand_tz)
     
     try:
         # ป้องกันการเรียกฐานข้อมูลถี่เกินไป
@@ -54,10 +76,10 @@ async def add_plate(plate_number, timestamp=None):
         if current_time - last_db_access < min_db_access_interval:
             await asyncio.sleep(min_db_access_interval)
         
-        # ⚡ เก็บเฉพาะที่ Supabase ใน format ไทย
+        # เก็บเป็น timestamp (จะแปลงเป็นรูปแบบไทยตอนแสดงผล)
         data = {
             "plate": plate_number,
-            "timestamp": timestamp
+            "timestamp": now.isoformat()  # เก็บเป็นรูปแบบ ISO
         }
         
         # ดำเนินการแบบ non-blocking
@@ -77,8 +99,8 @@ async def add_plate(plate_number, timestamp=None):
         # ล้าง cache เพื่อให้ข้อมูลเป็นปัจจุบัน
         if plate_number in plates_cache:
             del plates_cache[plate_number]
-        search_cache.clear()  # ล้าง cache การค้นหา
-        all_plates_cache.clear()  # ล้าง cache ที่เก็บข้อมูลทั้งหมด
+        search_cache.clear()
+        all_plates_cache.clear()
         
         logger.info(f"Added plate to Supabase: {plate_number}")
         return True
@@ -135,9 +157,9 @@ async def search_plates(
         # เริ่มสร้าง query
         query = supabase_client.table("plates").select("*")
         
-        # ถ้ามีคำค้นหา ใช้ contains แทน begins with (เปลี่ยนจาก search_term% เป็น %search_term%)
+        # ถ้ามีคำค้นหา ใช้ contains แทน begins with
         if search_term:
-            query = query.ilike("plate", f"%{search_term}%")  # เปลี่ยนเป็น contains
+            query = query.ilike("plate", f"%{search_term}%")
         
         # การค้นหาตามช่วงวันที่ (มีทั้งวันที่เริ่มต้นและวันที่สิ้นสุด)
         if start_date and end_date:
@@ -149,32 +171,26 @@ async def search_plates(
                 # เพิ่ม 1 วันให้ end_date เพื่อให้รวมวันสุดท้าย
                 end_dt = end_dt + timedelta(days=1)
                 
-                # แปลงกลับเป็นสตริงในรูปแบบไทย
-                start_str = start_dt.strftime("%d/%m/%Y")
-                end_str = end_dt.strftime("%d/%m/%Y")
-                
-                # ค้นหาช่วงวันที่
-                query = query.gte("timestamp", start_str).lt("timestamp", end_str)
+                # ใช้ timestamp โดยตรงในการค้นหา
+                query = query.gte("timestamp", start_dt.isoformat())
+                query = query.lt("timestamp", end_dt.isoformat())
         
         # การค้นหาตามช่วงเดือนและปี
         elif start_month and end_month and start_year and end_year:
             try:
                 # สร้างวันที่เริ่มต้น (วันแรกของเดือนเริ่มต้น)
-                start_dt = datetime(int(start_year), int(start_month), 1)
+                thailand_tz = pytz.timezone('Asia/Bangkok')
+                start_dt = datetime(int(start_year), int(start_month), 1, tzinfo=thailand_tz)
                 
                 # สร้างวันที่สิ้นสุด (วันแรกของเดือนถัดไปหลังจากเดือนสิ้นสุด)
-                # ถ้าเป็นเดือน 12 ให้ไปปีถัดไปเดือน 1
                 if int(end_month) == 12:
-                    end_dt = datetime(int(end_year) + 1, 1, 1)
+                    end_dt = datetime(int(end_year) + 1, 1, 1, tzinfo=thailand_tz)
                 else:
-                    end_dt = datetime(int(end_year), int(end_month) + 1, 1)
+                    end_dt = datetime(int(end_year), int(end_month) + 1, 1, tzinfo=thailand_tz)
                 
-                # แปลงเป็นสตริงรูปแบบไทย
-                start_str = start_dt.strftime("%d/%m/%Y")
-                end_str = end_dt.strftime("%d/%m/%Y")
-                
-                # ค้นหาช่วงเดือน/ปี
-                query = query.gte("timestamp", start_str).lt("timestamp", end_str)
+                # ใช้ timestamp โดยตรงในการค้นหา
+                query = query.gte("timestamp", start_dt.isoformat())
+                query = query.lt("timestamp", end_dt.isoformat())
             except ValueError as e:
                 logger.error(f"Error processing month/year search: {e}")
         
@@ -182,24 +198,22 @@ async def search_plates(
         elif start_year and end_year:
             try:
                 # สร้างวันที่เริ่มต้น (1 มกราคมของปีเริ่มต้น)
-                start_dt = datetime(int(start_year), 1, 1)
+                thailand_tz = pytz.timezone('Asia/Bangkok')
+                start_dt = datetime(int(start_year), 1, 1, tzinfo=thailand_tz)
                 
                 # สร้างวันที่สิ้นสุด (1 มกราคมของปีถัดไปหลังจากปีสิ้นสุด)
-                end_dt = datetime(int(end_year) + 1, 1, 1)
+                end_dt = datetime(int(end_year) + 1, 1, 1, tzinfo=thailand_tz)
                 
-                # แปลงเป็นสตริงรูปแบบไทย
-                start_str = start_dt.strftime("%d/%m/%Y")
-                end_str = end_dt.strftime("%d/%m/%Y")
-                
-                # ค้นหาช่วงปี
-                query = query.gte("timestamp", start_str).lt("timestamp", end_str)
+                # ใช้ timestamp โดยตรงในการค้นหา
+                query = query.gte("timestamp", start_dt.isoformat())
+                query = query.lt("timestamp", end_dt.isoformat())
             except ValueError as e:
                 logger.error(f"Error processing year search: {e}")
         
         # จำกัดจำนวนผลลัพธ์
         query = query.limit(limit)
         
-        # เรียงลำดับตามวันที่ล่าสุด
+        # เรียงลำดับตามวันที่ล่าสุด (ใช้ timestamp โดยตรง)
         query = query.order('timestamp', desc=True)
         
         # ดำเนินการแบบ non-blocking
@@ -213,8 +227,16 @@ async def search_plates(
             logger.error(f"Supabase Search Error: {response.error}")
             return []
         
+        # แปลงรูปแบบวันที่สำหรับการแสดงผล
+        result = []
+        for item in response.data or []:
+            # ทำสำเนาข้อมูล
+            formatted_item = item.copy()
+            # แปลง timestamp เป็นรูปแบบไทย
+            formatted_item["timestamp"] = format_timestamp_thai(item.get("timestamp"))
+            result.append(formatted_item)
+        
         # เก็บผลลัพธ์ใน cache
-        result = response.data if response.data else []
         search_cache[cache_key] = result
         
         logger.info(f"Search results: {len(result)} plates found")
@@ -242,42 +264,30 @@ async def get_plates():
         loop = asyncio.get_event_loop()
         response = await loop.run_in_executor(
             None, 
-            lambda: supabase_client.table("plates").select("*").limit(MAX_RECORDS).execute()
+            lambda: supabase_client.table("plates")
+                    .select("*")
+                    .order('timestamp', desc=True)  # เรียงตามวันที่ล่าสุด
+                    .limit(MAX_RECORDS)
+                    .execute()
         )
         
         # บันทึกเวลาการเข้าถึงฐานข้อมูลล่าสุด
         last_db_access = time.time()
         
-        # เก็บผลลัพธ์
-        result = response.data if response.data else []
+        # แปลงรูปแบบวันที่สำหรับการแสดงผล
+        result = []
+        for item in response.data or []:
+            # ทำสำเนาข้อมูล
+            formatted_item = item.copy()
+            # แปลง timestamp เป็นรูปแบบไทย
+            formatted_item["timestamp"] = format_timestamp_thai(item.get("timestamp"))
+            result.append(formatted_item)
         
-        # เรียงลำดับข้อมูลตามปี เดือน วัน (จากมากไปน้อย)
-        def parse_timestamp(timestamp_str):
-            try:
-                # แยกวันที่และเวลา
-                date_part = timestamp_str.split(' ')[0] if ' ' in timestamp_str else timestamp_str
-                
-                # แยกวัน เดือน ปี
-                day, month, year = map(int, date_part.split('/'))
-                
-                # สร้าง tuple สำหรับการเรียงลำดับ (ปี, เดือน, วัน)
-                return (year, month, day)
-            except (ValueError, IndexError, AttributeError):
-                # กรณีที่เกิดข้อผิดพลาดในการแยกวันที่
-                return (0, 0, 0)  # ค่าเริ่มต้นถ้าไม่สามารถแยกข้อมูลได้
+        # เก็บผลลัพธ์ใน cache
+        all_plates_cache['all_plates'] = result
         
-        # เรียงลำดับข้อมูลโดยใช้ปี เดือน วัน (จากมากไปน้อย)
-        sorted_result = sorted(
-            result, 
-            key=lambda x: parse_timestamp(x.get('timestamp', '')), 
-            reverse=True  # เรียงจากมากไปน้อย
-        )
-        
-        # เก็บผลลัพธ์ที่เรียงลำดับแล้วใน cache
-        all_plates_cache['all_plates'] = sorted_result
-        
-        logger.info(f"Retrieved all plates, count: {len(sorted_result)}")
-        return sorted_result
+        logger.info(f"Retrieved all plates, count: {len(result)}")
+        return result
     except Exception as e:
         logger.error(f"Supabase Get Plates Error: {e}")
         return []
@@ -291,7 +301,7 @@ async def get_plate(plate_number):
             return plates_cache[plate_number]
         
         # ใช้ฟังก์ชัน search_plates ที่ปรับปรุงแล้ว
-        results = await search_plates(search_term=plate_number, limit=1)
+        results = await search_plates(search_term=plate_number, limit=10)
         
         # กรองเฉพาะผลลัพธ์ที่ตรงกับเลขทะเบียนที่ต้องการ
         result = next((item for item in results if item["plate"] == plate_number), None)

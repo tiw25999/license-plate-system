@@ -35,17 +35,24 @@ class SearchParams(BaseModel):
 async def add_plate_route(plate_number: str):
     """เพิ่มทะเบียนใหม่"""
     try:
-        # สร้าง timestamp ในรูปแบบไทย
-        thailand_tz = pytz.timezone('Asia/Bangkok')
-        now = datetime.now(thailand_tz)
-        timestamp = now.strftime("%d/%m/%Y %H:%M:%S")  # Thai format for display
+        # ไม่ต้องสร้าง timestamp ตรงนี้เพราะจะสร้างใน database.py
+        await add_plate(plate_number)
         
-        await add_plate(plate_number, timestamp)
-        return {
-            "status": "success",
-            "plate_number": plate_number,
-            "timestamp": timestamp
-        }
+        # ดึงข้อมูลที่เพิ่งเพิ่มเพื่อรับ timestamp ที่ถูกต้อง
+        result = await get_plate(plate_number)
+        
+        if result:
+            return {
+                "status": "success",
+                "plate_number": plate_number,
+                "timestamp": result["timestamp"]  # timestamp ที่ถูกแปลงเป็นรูปแบบไทยแล้ว
+            }
+        else:
+            return {
+                "status": "success",
+                "plate_number": plate_number,
+                "timestamp": "N/A"
+            }
     except Exception as e:
         logger.error(f"Error adding plate: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
