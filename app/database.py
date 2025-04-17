@@ -116,6 +116,8 @@ async def search_plates(
     end_month=None,
     start_year=None,
     end_year=None,
+    start_hour=None,   # เพิ่มพารามิเตอร์ช่วงเวลาเริ่มต้น
+    end_hour=None,     # เพิ่มพารามิเตอร์ช่วงเวลาสิ้นสุด
     limit=MAX_RECORDS
 ):
     """
@@ -129,6 +131,8 @@ async def search_plates(
     - end_month (str): เดือนสิ้นสุด (1-12)
     - start_year (str): ปีเริ่มต้น (เช่น 1990)
     - end_year (str): ปีสิ้นสุด (เช่น 2023)
+    - start_hour (str): ชั่วโมงเริ่มต้น (0-23)
+    - end_hour (str): ชั่วโมงสิ้นสุด (0-23)
     - limit (int): จำนวนผลลัพธ์สูงสุด
     
     Returns:
@@ -141,7 +145,7 @@ async def search_plates(
         limit = MAX_RECORDS
     
     # สร้าง cache key จากพารามิเตอร์ทั้งหมด
-    cache_key = f"{search_term}_{start_date}_{end_date}_{start_month}_{end_month}_{start_year}_{end_year}_{limit}"
+    cache_key = f"{search_term}_{start_date}_{end_date}_{start_month}_{end_month}_{start_year}_{end_year}_{start_hour}_{end_hour}_{limit}"
     
     # เช็คว่ามีใน cache หรือไม่
     if cache_key in search_cache:
@@ -227,13 +231,35 @@ async def search_plates(
             logger.error(f"Supabase Search Error: {response.error}")
             return []
         
-        # แปลงรูปแบบวันที่สำหรับการแสดงผล
+        # แปลงรูปแบบวันที่และกรองตามช่วงเวลา (ถ้ามี)
         result = []
         for item in response.data or []:
             # ทำสำเนาข้อมูล
             formatted_item = item.copy()
-            # แปลง timestamp เป็นรูปแบบไทย
-            formatted_item["timestamp"] = format_timestamp_thai(item.get("timestamp"))
+            
+            # แปลง timestamp เป็น datetime object
+            timestamp = item.get("timestamp")
+            if timestamp:
+                try:
+                    # แปลง timestamp จาก string เป็น datetime
+                    if isinstance(timestamp, str):
+                        timestamp_dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                    else:
+                        timestamp_dt = timestamp
+                    
+                    # กรองตามช่วงเวลา (ถ้ามี)
+                    if start_hour is not None and end_hour is not None:
+                        hour = timestamp_dt.hour
+                        if not (int(start_hour) <= hour <= int(end_hour)):
+                            # ข้ามรายการนี้ถ้าไม่อยู่ในช่วงเวลาที่กำหนด
+                            continue
+                    
+                    # แปลงเป็นรูปแบบไทย
+                    formatted_item["timestamp"] = format_timestamp_thai(timestamp_dt)
+                except Exception as e:
+                    logger.error(f"Error processing timestamp: {e}")
+                    formatted_item["timestamp"] = format_timestamp_thai(timestamp)
+            
             result.append(formatted_item)
         
         # เก็บผลลัพธ์ใน cache

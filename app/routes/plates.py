@@ -29,6 +29,8 @@ class SearchParams(BaseModel):
     end_month: Optional[str] = Field(None, description="เดือนสิ้นสุด (1-12)")
     start_year: Optional[str] = Field(None, description="ปีเริ่มต้น (เช่น 2023)")
     end_year: Optional[str] = Field(None, description="ปีสิ้นสุด (เช่น 2023)")
+    start_hour: Optional[str] = Field(None, description="ชั่วโมงเริ่มต้น (0-23)")
+    end_hour: Optional[str] = Field(None, description="ชั่วโมงสิ้นสุด (0-23)")
     limit: int = Field(5000, ge=1, le=5000, description="จำนวนผลลัพธ์สูงสุด (1-5000)")
 
 @plates_router.post("/add_plate", response_model=PlateResponse)
@@ -90,6 +92,7 @@ async def search_plates_route(search_params: SearchParams):
     - ค้นหาตามช่วงวันที่ เช่น วันที่ 01/01/1990 ถึง 31/12/2023
     - ค้นหาตามช่วงเดือน เช่น เดือน 1 ปี 1990 ถึง เดือน 12 ปี 2023
     - ค้นหาตามช่วงปี เช่น ปี 1990 ถึง 2023
+    - ค้นหาตามช่วงเวลา เช่น 8:00-17:00
     """
     try:
         # ตรวจสอบความถูกต้องของรูปแบบวันที่
@@ -139,6 +142,23 @@ async def search_plates_route(search_params: SearchParams):
                 except ValueError:
                     raise HTTPException(status_code=400, detail="ปีต้องเป็นตัวเลข")
         
+        # ตรวจสอบความถูกต้องของช่วงเวลา
+        if search_params.start_hour or search_params.end_hour:
+            if bool(search_params.start_hour) != bool(search_params.end_hour):
+                raise HTTPException(status_code=400, detail="ต้องระบุทั้งเวลาเริ่มต้นและเวลาสิ้นสุด")
+            
+            try:
+                start_hour = int(search_params.start_hour)
+                end_hour = int(search_params.end_hour)
+                
+                if start_hour < 0 or start_hour > 23 or end_hour < 0 or end_hour > 23:
+                    raise HTTPException(status_code=400, detail="ช่วงเวลาต้องเป็นตัวเลข 0-23")
+                
+                if start_hour > end_hour:
+                    raise HTTPException(status_code=400, detail="เวลาเริ่มต้นต้องน้อยกว่าหรือเท่ากับเวลาสิ้นสุด")
+            except ValueError:
+                raise HTTPException(status_code=400, detail="ช่วงเวลาต้องเป็นตัวเลข")
+        
         # เรียกใช้ฟังก์ชันค้นหา
         results = await search_plates(
             search_term=search_params.search_term,
@@ -148,6 +168,8 @@ async def search_plates_route(search_params: SearchParams):
             end_month=search_params.end_month,
             start_year=search_params.start_year,
             end_year=search_params.end_year,
+            start_hour=search_params.start_hour,
+            end_hour=search_params.end_hour,
             limit=search_params.limit
         )
         
@@ -175,12 +197,15 @@ async def search_plates_get(
     end_month: Optional[str] = Query(None, description="เดือนสิ้นสุด (1-12)"),
     start_year: Optional[str] = Query(None, description="ปีเริ่มต้น (เช่น 1990)"),
     end_year: Optional[str] = Query(None, description="ปีสิ้นสุด (เช่น 2023)"),
+    start_hour: Optional[str] = Query(None, description="ชั่วโมงเริ่มต้น (0-23)"),
+    end_hour: Optional[str] = Query(None, description="ชั่วโมงสิ้นสุด (0-23)"),
     limit: int = Query(1000, ge=1, le=1000, description="จำนวนผลลัพธ์สูงสุด (1-1000)")
 ):
     """
     ค้นหาทะเบียนตามเงื่อนไขต่างๆด้วย GET method:
     - ค้นหาทะเบียนที่มีตัวอักษรหรือตัวเลขที่ต้องการปรากฏอยู่ (ไม่จำเป็นต้องขึ้นต้น)
     - ค้นหาตามช่วงวันที่ เดือน ปี
+    - ค้นหาตามช่วงเวลาของวัน
     """
     # สร้าง SearchParams จาก query parameters
     search_params = SearchParams(
@@ -191,6 +216,8 @@ async def search_plates_get(
         end_month=end_month,
         start_year=start_year,
         end_year=end_year,
+        start_hour=start_hour,
+        end_hour=end_hour,
         limit=limit
     )
     
