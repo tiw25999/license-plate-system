@@ -144,6 +144,9 @@ async def search_plates(
     if limit > MAX_RECORDS:
         limit = MAX_RECORDS
     
+    # บันทึก log ข้อมูลการค้นหา
+    logger.info(f"Search parameters: term={search_term}, date={start_date}-{end_date}, hours={start_hour}-{end_hour}")
+    
     # สร้าง cache key จากพารามิเตอร์ทั้งหมด
     cache_key = f"{search_term}_{start_date}_{end_date}_{start_month}_{end_month}_{start_year}_{end_year}_{start_hour}_{end_hour}_{limit}"
     
@@ -231,6 +234,11 @@ async def search_plates(
             logger.error(f"Supabase Search Error: {response.error}")
             return []
         
+        # ตรวจสอบการกรองตามช่วงเวลา
+        has_hour_filter = start_hour is not None and end_hour is not None
+        if has_hour_filter:
+            logger.info(f"Filtering by hour range: {start_hour} - {end_hour}")
+        
         # แปลงรูปแบบวันที่และกรองตามช่วงเวลา (ถ้ามี)
         result = []
         for item in response.data or []:
@@ -247,15 +255,22 @@ async def search_plates(
                     else:
                         timestamp_dt = timestamp
                     
+                    # แปลงเป็น timezone ไทย เพื่อให้แน่ใจว่าใช้เวลาท้องถิ่นในการเปรียบเทียบ
+                    thailand_tz = pytz.timezone('Asia/Bangkok')
+                    local_dt = timestamp_dt.astimezone(thailand_tz)
+                    
                     # กรองตามช่วงเวลา (ถ้ามี)
-                    if start_hour is not None and end_hour is not None:
-                        hour = timestamp_dt.hour
+                    if has_hour_filter:
+                        hour = local_dt.hour
                         if not (int(start_hour) <= hour <= int(end_hour)):
                             # ข้ามรายการนี้ถ้าไม่อยู่ในช่วงเวลาที่กำหนด
+                            logger.debug(f"Filtering out: hour={hour}, not in range {start_hour}-{end_hour}")
                             continue
+                        else:
+                            logger.debug(f"Including: hour={hour}, is in range {start_hour}-{end_hour}")
                     
                     # แปลงเป็นรูปแบบไทย
-                    formatted_item["timestamp"] = format_timestamp_thai(timestamp_dt)
+                    formatted_item["timestamp"] = format_timestamp_thai(local_dt)
                 except Exception as e:
                     logger.error(f"Error processing timestamp: {e}")
                     formatted_item["timestamp"] = format_timestamp_thai(timestamp)
