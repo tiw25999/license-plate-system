@@ -1,9 +1,11 @@
-from fastapi import APIRouter, Query, HTTPException, Path
+from fastapi import APIRouter, Query, HTTPException, Path, Depends, Request
+from app.schemas import PlateModel, PlateResponse, SearchParams
 from app.database import add_plate, get_plate, get_plates, search_plates
+from app.middleware import verify_token, require_auth, require_admin
+from app.config import supabase_client
 from datetime import datetime
 import pytz
 from typing import Optional, List
-from pydantic import BaseModel, Field
 import logging
 import re
 
@@ -12,33 +14,22 @@ logger = logging.getLogger(__name__)
 
 plates_router = APIRouter()
 
-class PlateModel(BaseModel):
-    plate: str
-    timestamp: str
-
-class PlateResponse(BaseModel):
-    status: str
-    plate_number: str
-    timestamp: str
-
-class SearchParams(BaseModel):
-    search_term: Optional[str] = Field(None, description="คำค้นหาสำหรับทะเบียนรถ เช่น 'ABC'")
-    start_date: Optional[str] = Field(None, description="วันที่เริ่มต้นในรูปแบบ DD/MM/YYYY")
-    end_date: Optional[str] = Field(None, description="วันที่สิ้นสุดในรูปแบบ DD/MM/YYYY")
-    start_month: Optional[str] = Field(None, description="เดือนเริ่มต้น (1-12)")
-    end_month: Optional[str] = Field(None, description="เดือนสิ้นสุด (1-12)")
-    start_year: Optional[str] = Field(None, description="ปีเริ่มต้น (เช่น 2023)")
-    end_year: Optional[str] = Field(None, description="ปีสิ้นสุด (เช่น 2023)")
-    start_hour: Optional[str] = Field(None, description="ชั่วโมงเริ่มต้น (0-23)")
-    end_hour: Optional[str] = Field(None, description="ชั่วโมงสิ้นสุด (0-23)")
-    limit: int = Field(5000, ge=1, le=5000, description="จำนวนผลลัพธ์สูงสุด (1-5000)")
-
 @plates_router.post("/add_plate", response_model=PlateResponse)
-async def add_plate_route(plate_number: str):
-    """เพิ่มทะเบียนใหม่"""
+async def add_plate_route(
+    plate_number: str,
+    province: Optional[str] = None,
+    id_camera: Optional[str] = None,
+    camera_name: Optional[str] = None,
+    request: Request = None,
+    user = Depends(require_auth)
+):
+    """เพิ่มทะเบียนใหม่ (ต้อง login ก่อน)"""
     try:
-        # ไม่ต้องสร้าง timestamp ตรงนี้เพราะจะสร้างใน database.py
-        await add_plate(plate_number)
+        # ดึง user_id จาก request state
+        user_id = request.state.user.id if hasattr(request.state, "user") else None
+        
+        # เพิ่มทะเบียน
+        await add_plate(plate_number, province, id_camera, camera_name, user_id)
         
         # ดึงข้อมูลที่เพิ่งเพิ่มเพื่อรับ timestamp ที่ถูกต้อง
         result = await get_plate(plate_number)
@@ -47,13 +38,19 @@ async def add_plate_route(plate_number: str):
             return {
                 "status": "success",
                 "plate_number": plate_number,
-                "timestamp": result["timestamp"]  # timestamp ที่ถูกแปลงเป็นรูปแบบไทยแล้ว
+                "timestamp": result["timestamp"],
+                "province": result.get("province"),
+                "id_camera": result.get("id_camera"),
+                "camera_name": result.get("camera_name")
             }
         else:
             return {
                 "status": "success",
                 "plate_number": plate_number,
-                "timestamp": "N/A"
+                "timestamp": "N/A",
+                "province": province,
+                "id_camera": id_camera,
+                "camera_name": camera_name
             }
     except Exception as e:
         logger.error(f"Error adding plate: {str(e)}")
@@ -66,7 +63,13 @@ async def fetch_plates(plate_number: Optional[str] = Query(None)):
         if plate_number:
             result = await get_plate(plate_number)
             if result:
-                return [PlateModel(plate=result["plate"], timestamp=result["timestamp"])]
+                return [PlateModel(
+                    plate=result["plate"],
+                    timestamp=result["timestamp"],
+                    province=result.get("province"),
+                    id_camera=result.get("id_camera"),
+                    camera_name=result.get("camera_name")
+                )]
             raise HTTPException(status_code=404, detail="Plate not found")
         else:
             plates = await get_plates()
@@ -75,7 +78,10 @@ async def fetch_plates(plate_number: Optional[str] = Query(None)):
             for plate in plates:
                 filtered_plates.append(PlateModel(
                     plate=plate["plate"],
-                    timestamp=plate["timestamp"]
+                    timestamp=plate["timestamp"],
+                    province=plate.get("province"),
+                    id_camera=plate.get("id_camera"),
+                    camera_name=plate.get("camera_name")
                 ))
             return filtered_plates
     except HTTPException:
@@ -93,6 +99,9 @@ async def search_plates_route(search_params: SearchParams):
     - ค้นหาตามช่วงเดือน เช่น เดือน 1 ปี 1990 ถึง เดือน 12 ปี 2023
     - ค้นหาตามช่วงปี เช่น ปี 1990 ถึง 2023
     - ค้นหาตามช่วงเวลา เช่น 8:00-17:00
+    - ค้นหาตามจังหวัด
+    - ค้นหาตามรหัสกล้อง
+    - ค้นหาตามชื่อกล้อง
     """
     try:
         # ตรวจสอบความถูกต้องของรูปแบบวันที่
@@ -170,6 +179,9 @@ async def search_plates_route(search_params: SearchParams):
             end_year=search_params.end_year,
             start_hour=search_params.start_hour,
             end_hour=search_params.end_hour,
+            province=search_params.province,
+            id_camera=search_params.id_camera,
+            camera_name=search_params.camera_name,
             limit=search_params.limit
         )
         
@@ -178,7 +190,10 @@ async def search_plates_route(search_params: SearchParams):
         for plate in results:
             filtered_plates.append(PlateModel(
                 plate=plate["plate"],
-                timestamp=plate["timestamp"]
+                timestamp=plate["timestamp"],
+                province=plate.get("province"),
+                id_camera=plate.get("id_camera"),
+                camera_name=plate.get("camera_name")
             ))
         
         return filtered_plates
@@ -199,6 +214,9 @@ async def search_plates_get(
     end_year: Optional[str] = Query(None, description="ปีสิ้นสุด (เช่น 2023)"),
     start_hour: Optional[str] = Query(None, description="ชั่วโมงเริ่มต้น (0-23)"),
     end_hour: Optional[str] = Query(None, description="ชั่วโมงสิ้นสุด (0-23)"),
+    province: Optional[str] = Query(None, description="จังหวัดของทะเบียนรถ"),
+    id_camera: Optional[str] = Query(None, description="รหัสกล้อง"),
+    camera_name: Optional[str] = Query(None, description="ชื่อกล้อง"),
     limit: int = Query(1000, ge=1, le=1000, description="จำนวนผลลัพธ์สูงสุด (1-1000)")
 ):
     """
@@ -206,6 +224,9 @@ async def search_plates_get(
     - ค้นหาทะเบียนที่มีตัวอักษรหรือตัวเลขที่ต้องการปรากฏอยู่ (ไม่จำเป็นต้องขึ้นต้น)
     - ค้นหาตามช่วงวันที่ เดือน ปี
     - ค้นหาตามช่วงเวลาของวัน
+    - ค้นหาตามจังหวัด
+    - ค้นหาตามรหัสกล้อง
+    - ค้นหาตามชื่อกล้อง
     """
     # สร้าง SearchParams จาก query parameters
     search_params = SearchParams(
@@ -218,8 +239,73 @@ async def search_plates_get(
         end_year=end_year,
         start_hour=start_hour,
         end_hour=end_hour,
+        province=province,
+        id_camera=id_camera,
+        camera_name=camera_name,
         limit=limit
     )
     
     # เรียกใช้ฟังก์ชันค้นหาที่มีอยู่แล้ว
     return await search_plates_route(search_params)
+
+@plates_router.delete("/delete_plate/{plate_id}")
+async def delete_plate(plate_id: str, user = Depends(require_admin)):
+    """ลบทะเบียนตาม ID (เฉพาะ admin เท่านั้น)"""
+    try:
+        # ลบข้อมูลจาก Supabase
+        response = supabase_client.table("plates").delete().eq("id", plate_id).execute()
+        
+        if hasattr(response, 'error') and response.error:
+            raise HTTPException(status_code=500, detail=f"Error deleting plate: {response.error}")
+        
+        # ล้าง cache
+        from app.database import clear_caches
+        await clear_caches()
+        
+        return {"message": "ลบข้อมูลทะเบียนเรียบร้อยแล้ว"}
+    except Exception as e:
+        logger.error(f"Error deleting plate: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@plates_router.get("/get_provinces", response_model=List[str])
+async def get_provinces():
+    """ดึงรายชื่อจังหวัดทั้งหมดที่มีในระบบ"""
+    try:
+        # ดึงข้อมูลจังหวัดที่ไม่ซ้ำกันจาก Supabase
+        response = supabase_client.table("plates").select("province").execute()
+        
+        if hasattr(response, 'error') and response.error:
+            raise HTTPException(status_code=500, detail=f"Error fetching provinces: {response.error}")
+        
+        # กรองเฉพาะค่าที่ไม่ซ้ำและไม่เป็น null
+        provinces = set()
+        for item in response.data:
+            if item.get("province"):
+                provinces.add(item["province"])
+        
+        return sorted(list(provinces))
+    except Exception as e:
+        logger.error(f"Error fetching provinces: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@plates_router.get("/get_cameras", response_model=List[dict])
+async def get_cameras():
+    """ดึงรายการกล้องทั้งหมดที่มีในระบบ"""
+    try:
+        # ดึงข้อมูลกล้องที่ไม่ซ้ำกันจาก Supabase
+        response = supabase_client.table("plates").select("id_camera, camera_name").execute()
+        
+        if hasattr(response, 'error') and response.error:
+            raise HTTPException(status_code=500, detail=f"Error fetching cameras: {response.error}")
+        
+        # กรองเฉพาะค่าที่ไม่ซ้ำและไม่เป็น null
+        cameras = {}
+        for item in response.data:
+            if item.get("id_camera") and item.get("camera_name"):
+                cameras[item["id_camera"]] = item["camera_name"]
+        
+        result = [{"id_camera": k, "camera_name": v} for k, v in cameras.items()]
+        return sorted(result, key=lambda x: x["id_camera"])
+    except Exception as e:
+        logger.error(f"Error fetching cameras: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))

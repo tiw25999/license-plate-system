@@ -8,6 +8,7 @@ from cachetools import TTLCache
 import logging
 import time
 import re
+from fastapi import Request
 
 # ตั้งค่า logging
 logging.basicConfig(level=logging.INFO)
@@ -62,7 +63,7 @@ def format_timestamp_thai(timestamp):
     # แปลงเป็นรูปแบบสตริง DD/MM/YYYY HH:MM:SS
     return local_dt.strftime("%d/%m/%Y %H:%M:%S")
 
-async def add_plate(plate_number, timestamp=None):
+async def add_plate(plate_number, province=None, id_camera=None, camera_name=None, user_id=None, timestamp=None):
     """เพิ่มทะเบียนไปที่ Supabase ด้วย async"""
     global last_db_access
     
@@ -81,6 +82,18 @@ async def add_plate(plate_number, timestamp=None):
             "plate": plate_number,
             "timestamp": now.isoformat()  # เก็บเป็นรูปแบบ ISO
         }
+        
+        # เพิ่มข้อมูล user_id ถ้ามี
+        if user_id:
+            data["user_id"] = user_id
+            
+        # เพิ่มข้อมูลจังหวัดและกล้องถ้ามี
+        if province:
+            data["province"] = province
+        if id_camera:
+            data["id_camera"] = id_camera
+        if camera_name:
+            data["camera_name"] = camera_name
         
         # ดำเนินการแบบ non-blocking
         loop = asyncio.get_event_loop()
@@ -116,8 +129,11 @@ async def search_plates(
     end_month=None,
     start_year=None,
     end_year=None,
-    start_hour=None,   # เพิ่มพารามิเตอร์ช่วงเวลาเริ่มต้น
-    end_hour=None,     # เพิ่มพารามิเตอร์ช่วงเวลาสิ้นสุด
+    start_hour=None,
+    end_hour=None,
+    province=None,      # เพิ่มพารามิเตอร์จังหวัด
+    id_camera=None,     # เพิ่มพารามิเตอร์ ID กล้อง
+    camera_name=None,   # เพิ่มพารามิเตอร์ชื่อกล้อง
     limit=MAX_RECORDS
 ):
     """
@@ -133,6 +149,9 @@ async def search_plates(
     - end_year (str): ปีสิ้นสุด (เช่น 2023)
     - start_hour (str): ชั่วโมงเริ่มต้น (0-23)
     - end_hour (str): ชั่วโมงสิ้นสุด (0-23)
+    - province (str): จังหวัดของทะเบียนรถ
+    - id_camera (str): รหัสกล้อง
+    - camera_name (str): ชื่อกล้อง
     - limit (int): จำนวนผลลัพธ์สูงสุด
     
     Returns:
@@ -145,10 +164,10 @@ async def search_plates(
         limit = MAX_RECORDS
     
     # บันทึก log ข้อมูลการค้นหา
-    logger.info(f"Search parameters: term={search_term}, date={start_date}-{end_date}, hours={start_hour}-{end_hour}")
+    logger.info(f"Search parameters: term={search_term}, date={start_date}-{end_date}, hours={start_hour}-{end_hour}, province={province}")
     
     # สร้าง cache key จากพารามิเตอร์ทั้งหมด
-    cache_key = f"{search_term}_{start_date}_{end_date}_{start_month}_{end_month}_{start_year}_{end_year}_{start_hour}_{end_hour}_{limit}"
+    cache_key = f"{search_term}_{start_date}_{end_date}_{start_month}_{end_month}_{start_year}_{end_year}_{start_hour}_{end_hour}_{province}_{id_camera}_{camera_name}_{limit}"
     
     # เช็คว่ามีใน cache หรือไม่
     if cache_key in search_cache:
@@ -167,6 +186,18 @@ async def search_plates(
         # ถ้ามีคำค้นหา ใช้ contains แทน begins with
         if search_term:
             query = query.ilike("plate", f"%{search_term}%")
+        
+        # เพิ่มเงื่อนไขการค้นหาตามจังหวัด
+        if province:
+            query = query.eq("province", province)
+            
+        # เพิ่มเงื่อนไขการค้นหาตาม ID กล้อง
+        if id_camera:
+            query = query.eq("id_camera", id_camera)
+            
+        # เพิ่มเงื่อนไขการค้นหาตามชื่อกล้อง
+        if camera_name:
+            query = query.ilike("camera_name", f"%{camera_name}%")
         
         # การค้นหาตามช่วงวันที่ (มีทั้งวันที่เริ่มต้นและวันที่สิ้นสุด)
         if start_date and end_date:
@@ -355,3 +386,7 @@ async def get_plate(plate_number):
     except Exception as e:
         logger.error(f"Get Plate Exception: {e}")
         return None
+async def clear_caches():
+    """ล้าง cache ทั้งหมด"""
+    search_cache.clear()
+    all_plates_cache.clear()

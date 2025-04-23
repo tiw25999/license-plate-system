@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from app.routes.plates import plates_router
+from app.routes.auth import auth_router  # เพิ่มบรรทัดนี้
 import uvicorn
 from dotenv import load_dotenv
 import logging
@@ -18,12 +19,12 @@ load_dotenv()
 
 app = FastAPI(title="License Plate API")
 
-# เพิ่ม CORS middleware ที่ปลอดภัยมากขึ้น
+# เพิ่ม CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["https://license-plate-web-production.up.railway.app", "http://localhost:3000"],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE"],  # ระบุเฉพาะ methods ที่จำเป็น
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["*"],
     max_age=86400,  # cache CORS preflight requests for 24 hours
 )
@@ -68,6 +69,7 @@ async def startup_event():
 
 # Mount the routers
 app.include_router(plates_router, prefix="/plates", tags=["plates"])
+app.include_router(auth_router, prefix="/auth", tags=["auth"])  # เพิ่มบรรทัดนี้
 
 @app.get("/")
 def read_root():
