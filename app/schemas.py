@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from datetime import datetime
 
 # Models สำหรับข้อมูลทะเบียน
@@ -66,3 +66,103 @@ class UserInfo(UserBase):
 class ChangePassword(BaseModel):
     current_password: str
     new_password: str
+
+# Models สำหรับ Session และ Activity Log
+class SessionInfo(BaseModel):
+    id: str
+    user_id: str
+    session_token: str
+    expires_at: Optional[str] = None
+    ip_address: Optional[str] = None
+    user_agent: Optional[str] = None
+    last_active_at: Optional[str] = None
+    created_at: Optional[str] = None
+
+class ActivityLog(BaseModel):
+    id: str
+    user_id: str
+    action: str
+    table_name: Optional[str] = None
+    record_id: Optional[str] = None
+    description: Optional[str] = None
+    ip_address: Optional[str] = None
+    user_agent: Optional[str] = None
+    created_at: str
+
+# Models สำหรับกล้องและกลุ่มกล้อง
+class CameraGroupBase(BaseModel):
+    name: str
+    description: Optional[str] = None
+
+class CameraGroupCreate(CameraGroupBase):
+    pass
+
+class CameraGroupResponse(CameraGroupBase):
+    id: str
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+class CameraBase(BaseModel):
+    camera_id: str
+    name: str
+    location: Optional[str] = None
+    ip_address: Optional[str] = None
+    status: str = "active"
+    group_id: Optional[str] = None
+    settings: Optional[Dict[str, Any]] = None
+
+class CameraCreate(CameraBase):
+    pass
+
+class CameraResponse(CameraBase):
+    id: str
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+# Models สำหรับการติดตามและแจ้งเตือน
+class WatchlistBase(BaseModel):
+    plate: str
+    province: Optional[str] = None
+    reason: Optional[str] = None
+    status: str = "active"
+    priority: int = 0
+
+class WatchlistCreate(WatchlistBase):
+    pass
+
+class WatchlistResponse(WatchlistBase):
+    id: str
+    user_id: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+class AlertBase(BaseModel):
+    plate_id: str
+    watchlist_id: str
+    status: str = "new"
+    notes: Optional[str] = None
+
+class AlertCreate(AlertBase):
+    pass
+
+class AlertResponse(AlertBase):
+    id: str
+    handled_by: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    plate: Optional[Dict[str, Any]] = None
+    watchlist: Optional[Dict[str, Any]] = None
+
+# Models สำหรับการตั้งค่าระบบ
+class SystemSettingBase(BaseModel):
+    setting_key: str
+    setting_value: str
+    description: Optional[str] = None
+
+class SystemSettingCreate(SystemSettingBase):
+    pass
+
+class SystemSettingResponse(SystemSettingBase):
+    id: str
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
