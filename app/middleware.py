@@ -6,7 +6,7 @@ logger = logging.getLogger(__name__)
 
 async def verify_token(request: Request):
     """ตรวจสอบ token ของผู้ใช้
-    สามารถใช้ได้ทั้ง session token และ JWT token ของ Supabase
+    ใช้ session token จากตาราง user_sessions
     """
     try:
         # ดึง token จาก header
@@ -16,7 +16,7 @@ async def verify_token(request: Request):
         
         token = auth_header.split(" ")[1]
         
-        # ลองตรวจสอบกับ session ก่อน (เนื่องจากอาจเป็น session token ที่เราสร้างเอง)
+        # ตรวจสอบ session token ในฐานข้อมูลใหม่
         session_data = supabase_client.rpc(
             'validate_session',
             {'p_session_token': token}
@@ -25,35 +25,19 @@ async def verify_token(request: Request):
         if session_data.data and session_data.data[0]['is_valid']:
             # ถ้า session token ถูกต้อง
             user_id = session_data.data[0]['user_id']
-            role = session_data.data[0]['role']
+            username = session_data.data[0]['username']
+            user_role = session_data.data[0]['user_role']
             
-            # ดึงข้อมูลผู้ใช้จาก auth.users
-            user_data = supabase_client.table("auth.users").select("*").eq("id", user_id).single().execute()
+            # ดึงข้อมูลผู้ใช้จากตาราง users
+            user_data = supabase_client.table("users").select("*").eq("id", user_id).single().execute()
             
             if user_data.data:
                 # เก็บข้อมูลผู้ใช้ใน request state
                 request.state.user = user_data.data
-                request.state.role = role
+                request.state.user.id = user_id  # ให้แน่ใจว่ามี id
+                request.state.role = user_role
                 request.state.session_token = token
                 return request.state.user
-        
-        # ถ้า session token ไม่ถูกต้อง ให้ลองตรวจสอบกับ JWT token ของ Supabase
-        response = supabase_client.auth.get_user(token)
-        
-        if not hasattr(response, 'error') or not response.error:
-            # เก็บข้อมูลผู้ใช้ใน request state
-            request.state.user = response.user
-            
-            # ดึงข้อมูล role
-            role_data = supabase_client.table("user_roles").select("role").eq("user_id", response.user.id).execute()
-            
-            if role_data.data and len(role_data.data) > 0:
-                request.state.role = role_data.data[0]["role"]
-            else:
-                request.state.role = "member"  # ค่าเริ่มต้น
-            
-            request.state.jwt_token = token
-            return request.state.user
         
         return None
     except Exception as e:
@@ -70,13 +54,13 @@ async def require_auth(request: Request):
         )
     
     # บันทึกกิจกรรม
-    if hasattr(request.state, "session_token") or hasattr(request.state, "jwt_token"):
+    if hasattr(request.state, "session_token"):
         try:
             # บันทึกกิจกรรมการใช้งาน API
             supabase_client.rpc(
                 'log_activity',
                 {
-                    'p_user_id': user.id if hasattr(user, 'id') else user['id'],
+                    'p_user_id': user['id'] if isinstance(user, dict) else user.id,
                     'p_action': f"API_{request.method}",
                     'p_table_name': None,
                     'p_record_id': None,
@@ -100,19 +84,29 @@ async def require_admin(request: Request):
         )
     
     if not hasattr(request.state, "role") or request.state.role != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="คุณไม่มีสิทธิ์ในการเข้าถึงส่วนนี้"
-        )
+        # ตรวจสอบว่าเป็น admin หรือไม่
+        is_admin_result = supabase_client.rpc(
+            'is_admin',
+            {'user_id': user['id'] if isinstance(user, dict) else user.id}
+        ).execute()
+        
+        if not is_admin_result.data or not is_admin_result.data[0]:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="คุณไม่มีสิทธิ์ในการเข้าถึงส่วนนี้"
+            )
+        
+        # เก็บบทบาทใน request state
+        request.state.role = "admin"
     
     # บันทึกกิจกรรม admin
-    if hasattr(request.state, "session_token") or hasattr(request.state, "jwt_token"):
+    if hasattr(request.state, "session_token"):
         try:
             # บันทึกกิจกรรมการใช้งาน API โดย admin
             supabase_client.rpc(
                 'log_activity',
                 {
-                    'p_user_id': user.id if hasattr(user, 'id') else user['id'],
+                    'p_user_id': user['id'] if isinstance(user, dict) else user.id,
                     'p_action': f"ADMIN_{request.method}",
                     'p_table_name': None,
                     'p_record_id': None,

@@ -41,7 +41,8 @@ class SearchParams(BaseModel):
 
 # Models สำหรับ Authentication
 class UserBase(BaseModel):
-    email: str
+    username: str
+    email: Optional[str] = None
 
 class UserLogin(UserBase):
     password: str

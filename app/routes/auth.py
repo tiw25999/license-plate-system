@@ -15,9 +15,10 @@ async def signup(user: UserSignUp, request: Request):
     """สมัครสมาชิกใหม่"""
     try:
         # ตรวจสอบความถูกต้องของอีเมล
-        email_pattern = r'^[\w\.-]+@[\w\.-]+\.\w+$'
-        if not re.match(email_pattern, user.email):
-            raise HTTPException(status_code=400, detail="รูปแบบอีเมลไม่ถูกต้อง")
+        if user.email:
+            email_pattern = r'^[\w\.-]+@[\w\.-]+\.\w+$'
+            if not re.match(email_pattern, user.email):
+                raise HTTPException(status_code=400, detail="รูปแบบอีเมลไม่ถูกต้อง")
         
         # ตรวจสอบว่ารหัสผ่านตรงกันหรือไม่
         if user.password != user.confirm_password:
@@ -27,37 +28,45 @@ async def signup(user: UserSignUp, request: Request):
         if len(user.password) < 6:
             raise HTTPException(status_code=400, detail="รหัสผ่านต้องมีความยาวอย่างน้อย 6 ตัวอักษร")
         
-        # สร้างผู้ใช้ใหม่ใน Supabase Auth
-        response = supabase_client.auth.sign_up({
-            "email": user.email,
-            "password": user.password
-        })
+        # ตรวจสอบความยาวของ username
+        if len(user.username) < 3:
+            raise HTTPException(status_code=400, detail="ชื่อผู้ใช้ต้องมีความยาวอย่างน้อย 3 ตัวอักษร")
+        
+        # สร้างผู้ใช้ใหม่โดยใช้ฟังก์ชัน register_user
+        response = supabase_client.rpc(
+            'register_user',
+            {
+                'p_username': user.username,
+                'p_password': user.password,
+                'p_email': user.email,
+                'p_role': 'member'
+            }
+        ).execute()
         
         # ตรวจสอบการสร้างผู้ใช้
         if hasattr(response, 'error') and response.error:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"การสมัครสมาชิกล้มเหลว: {response.error.message}"
+                detail=f"การสมัครสมาชิกล้มเหลว: {response.error}"
             )
         
-        # ดึงข้อมูลผู้ใช้และ token
-        user_data = response.user
-        session = response.session
+        # ดึงข้อมูลผู้ใช้
+        user_id = response.data[0]  # register_user จะ return user_id
         
-        # กำหนดให้เป็น member โดยค่าเริ่มต้น
-        supabase_client.rpc(
-            'set_user_role',
-            {
-                'target_user_id': user_data.id,
-                'new_role': 'member'
-            }
-        ).execute()
+        # ดึงข้อมูลผู้ใช้จากตาราง users
+        user_data = supabase_client.table("users").select("*").eq("id", user_id).single().execute()
+        
+        if not user_data.data:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="ไม่พบข้อมูลผู้ใช้หลังจากลงทะเบียน"
+            )
         
         # สร้าง session ใหม่
         session_data = supabase_client.rpc(
             'create_user_session',
             {
-                'p_user_id': user_data.id,
+                'p_user_id': user_id,
                 'p_ip_address': request.client.host if request.client else None,
                 'p_user_agent': request.headers.get("user-agent")
             }
@@ -71,10 +80,10 @@ async def signup(user: UserSignUp, request: Request):
         supabase_client.rpc(
             'log_activity',
             {
-                'p_user_id': user_data.id,
+                'p_user_id': user_id,
                 'p_action': 'signup',
-                'p_table_name': 'auth.users',
-                'p_record_id': user_data.id,
+                'p_table_name': 'users',
+                'p_record_id': user_id,
                 'p_description': 'สมัครสมาชิกใหม่',
                 'p_ip_address': request.client.host if request.client else None,
                 'p_user_agent': request.headers.get("user-agent")
@@ -82,10 +91,11 @@ async def signup(user: UserSignUp, request: Request):
         ).execute()
         
         return {
-            "id": user_data.id,
-            "email": user_data.email,
+            "id": user_id,
+            "username": user_data.data["username"],
+            "email": user_data.data.get("email"),
             "role": "member",
-            "token": session_token or session.access_token
+            "token": session_token
         }
     except HTTPException:
         raise
@@ -100,35 +110,33 @@ async def signup(user: UserSignUp, request: Request):
 async def login(user: UserLogin, request: Request):
     """เข้าสู่ระบบ"""
     try:
-        # เข้าสู่ระบบด้วย Supabase Auth
-        response = supabase_client.auth.sign_in_with_password({
-            "email": user.email,
-            "password": user.password
-        })
+        # เข้าสู่ระบบด้วยฟังก์ชัน login_user
+        response = supabase_client.rpc(
+            'login_user',
+            {
+                'p_username': user.username,
+                'p_password': user.password
+            }
+        ).execute()
         
         # ตรวจสอบการเข้าสู่ระบบ
-        if hasattr(response, 'error') and response.error:
+        if not response.data or not response.data[0].get('login_success'):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="อีเมลหรือรหัสผ่านไม่ถูกต้อง"
+                detail="ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง"
             )
         
-        # ดึงข้อมูลผู้ใช้และ token
-        user_data = response.user
-        session = response.session
-        
-        # ดึงข้อมูล role จากตาราง user_roles
-        role_data = supabase_client.table("user_roles").select("role").eq("user_id", user_data.id).execute()
-        
-        role = "member"  # ค่าเริ่มต้น
-        if role_data.data and len(role_data.data) > 0:
-            role = role_data.data[0]["role"]
+        # ดึงข้อมูลผู้ใช้
+        user_id = response.data[0]['user_id']
+        username = response.data[0]['username']
+        email = response.data[0]['email']
+        role = response.data[0]['role']
         
         # สร้าง session ใหม่
         session_data = supabase_client.rpc(
             'create_user_session',
             {
-                'p_user_id': user_data.id,
+                'p_user_id': user_id,
                 'p_ip_address': request.client.host if request.client else None,
                 'p_user_agent': request.headers.get("user-agent")
             }
@@ -142,7 +150,7 @@ async def login(user: UserLogin, request: Request):
         supabase_client.rpc(
             'log_activity',
             {
-                'p_user_id': user_data.id,
+                'p_user_id': user_id,
                 'p_action': 'login',
                 'p_description': 'เข้าสู่ระบบ',
                 'p_ip_address': request.client.host if request.client else None,
@@ -151,10 +159,11 @@ async def login(user: UserLogin, request: Request):
         ).execute()
         
         return {
-            "id": user_data.id,
-            "email": user_data.email,
+            "id": user_id,
+            "username": username,
+            "email": email,
             "role": role,
-            "token": session_token or session.access_token
+            "token": session_token
         }
     except HTTPException:
         raise
@@ -171,7 +180,7 @@ async def logout(token: str, request: Request):
     try:
         user_id = None
         
-        # ตรวจสอบว่าเป็น session token หรือไม่
+        # ตรวจสอบ session token
         session_data = supabase_client.rpc(
             'validate_session',
             {'p_session_token': token}
@@ -187,13 +196,11 @@ async def logout(token: str, request: Request):
                 {'p_session_token': token}
             ).execute()
         else:
-            # ถ้าเป็น JWT token ของ Supabase
-            response = supabase_client.auth.get_user(token)
-            if not hasattr(response, 'error') or not response.error:
-                user_id = response.user.id
-            
-            # ออกจากระบบด้วย Supabase Auth
-            supabase_client.auth.sign_out(token)
+            # ถ้าไม่ใช่ session token ที่ถูกต้อง
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token ไม่ถูกต้องหรือหมดอายุ"
+            )
         
         # บันทึกกิจกรรม
         if user_id:
@@ -209,6 +216,8 @@ async def logout(token: str, request: Request):
             ).execute()
         
         return {"message": "ออกจากระบบสำเร็จ"}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Logout error: {str(e)}")
         raise HTTPException(
@@ -222,7 +231,7 @@ async def logout_all(token: str, request: Request):
     try:
         user_id = None
         
-        # ตรวจสอบว่าเป็น session token หรือไม่
+        # ตรวจสอบ session token
         session_data = supabase_client.rpc(
             'validate_session',
             {'p_session_token': token}
@@ -232,10 +241,11 @@ async def logout_all(token: str, request: Request):
             # ถ้าเป็น session token
             user_id = session_data.data[0]['user_id']
         else:
-            # ถ้าเป็น JWT token ของ Supabase
-            response = supabase_client.auth.get_user(token)
-            if not hasattr(response, 'error') or not response.error:
-                user_id = response.user.id
+            # ถ้าไม่ใช่ session token ที่ถูกต้อง
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token ไม่ถูกต้องหรือหมดอายุ"
+            )
         
         if not user_id:
             raise HTTPException(
@@ -275,7 +285,7 @@ async def logout_all(token: str, request: Request):
 async def get_current_user(token: str):
     """ดึงข้อมูลผู้ใช้ปัจจุบัน"""
     try:
-        # ตรวจสอบว่าเป็น session token หรือไม่
+        # ตรวจสอบ session token
         session_data = supabase_client.rpc(
             'validate_session',
             {'p_session_token': token}
@@ -284,10 +294,11 @@ async def get_current_user(token: str):
         if session_data.data and session_data.data[0]['is_valid']:
             # ถ้าเป็น session token
             user_id = session_data.data[0]['user_id']
-            role = session_data.data[0]['role']
+            username = session_data.data[0]['username']
+            user_role = session_data.data[0]['user_role']
             
-            # ดึงข้อมูลผู้ใช้จาก auth.users
-            user_data = supabase_client.table("auth.users").select("*").eq("id", user_id).single().execute()
+            # ดึงข้อมูลผู้ใช้จากตาราง users
+            user_data = supabase_client.table("users").select("*").eq("id", user_id).single().execute()
             
             if not user_data.data:
                 raise HTTPException(
@@ -297,33 +308,16 @@ async def get_current_user(token: str):
             
             return {
                 "id": user_id,
-                "email": user_data.data["email"],
-                "role": role
+                "username": username,
+                "email": user_data.data.get("email"),
+                "role": user_role
             }
         else:
-            # ถ้าเป็น JWT token ของ Supabase
-            response = supabase_client.auth.get_user(token)
-            
-            if hasattr(response, 'error') and response.error:
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Token ไม่ถูกต้องหรือหมดอายุ"
-                )
-            
-            user_data = response.user
-            
-            # ดึงข้อมูล role จากตาราง user_roles
-            role_data = supabase_client.table("user_roles").select("role").eq("user_id", user_data.id).execute()
-            
-            role = None
-            if role_data.data and len(role_data.data) > 0:
-                role = role_data.data[0]["role"]
-            
-            return {
-                "id": user_data.id,
-                "email": user_data.email,
-                "role": role
-            }
+            # ถ้าไม่ใช่ session token ที่ถูกต้อง
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token ไม่ถูกต้องหรือหมดอายุ"
+            )
     except HTTPException:
         raise
     except Exception as e:
@@ -340,7 +334,7 @@ async def get_users(token: str):
         is_admin = False
         user_id = None
         
-        # ตรวจสอบว่าเป็น session token หรือไม่
+        # ตรวจสอบ session token
         session_data = supabase_client.rpc(
             'validate_session',
             {'p_session_token': token}
@@ -349,28 +343,24 @@ async def get_users(token: str):
         if session_data.data and session_data.data[0]['is_valid']:
             # ถ้าเป็น session token
             user_id = session_data.data[0]['user_id']
-            role = session_data.data[0]['role']
+            role = session_data.data[0]['user_role']
             is_admin = (role == 'admin')
         else:
-            # ถ้าเป็น JWT token ของ Supabase
-            response = supabase_client.auth.get_user(token)
-            
-            if hasattr(response, 'error') and response.error:
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Token ไม่ถูกต้องหรือหมดอายุ"
-                )
-            
-            user_id = response.user.id
-            
+            # ถ้าไม่ใช่ session token ที่ถูกต้อง
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token ไม่ถูกต้องหรือหมดอายุ"
+            )
+        
+        if not is_admin:
             # ตรวจสอบว่าเป็น admin หรือไม่
             is_admin_result = supabase_client.rpc(
                 'is_admin',
                 {'user_id': user_id}
             ).execute()
             
-            if is_admin_result.data:
-                is_admin = is_admin_result.data
+            if is_admin_result.data and len(is_admin_result.data) > 0:
+                is_admin = is_admin_result.data[0]
         
         if not is_admin:
             raise HTTPException(
@@ -378,15 +368,25 @@ async def get_users(token: str):
                 detail="คุณไม่มีสิทธิ์ในการดูรายชื่อผู้ใช้ทั้งหมด"
             )
         
-        # ดึงข้อมูลผู้ใช้จาก Supabase
-        users_with_roles = supabase_client.rpc(
-            'get_users_with_roles'
+        # ดึงข้อมูลผู้ใช้ทั้งหมด
+        users_data = supabase_client.rpc(
+            'get_all_users'
         ).execute()
         
-        if hasattr(users_with_roles, 'error') and users_with_roles.error:
-            raise Exception(f"Error fetching users: {users_with_roles.error.message}")
+        if hasattr(users_data, 'error') and users_data.error:
+            raise Exception(f"Error fetching users: {users_data.error}")
         
-        return users_with_roles.data
+        # แปลงข้อมูลให้ตรงกับ schema
+        result = []
+        for user in users_data.data or []:
+            result.append({
+                "id": user["id"],
+                "username": user["username"],
+                "email": user.get("email"),
+                "role": user["role"]
+            })
+        
+        return result
     except HTTPException:
         raise
     except Exception as e:
@@ -403,7 +403,7 @@ async def update_user_role(role_update: UserRoleUpdate, token: str, request: Req
         is_admin = False
         user_id = None
         
-        # ตรวจสอบว่าเป็น session token หรือไม่
+        # ตรวจสอบ session token
         session_data = supabase_client.rpc(
             'validate_session',
             {'p_session_token': token}
@@ -412,28 +412,24 @@ async def update_user_role(role_update: UserRoleUpdate, token: str, request: Req
         if session_data.data and session_data.data[0]['is_valid']:
             # ถ้าเป็น session token
             user_id = session_data.data[0]['user_id']
-            role = session_data.data[0]['role']
+            role = session_data.data[0]['user_role']
             is_admin = (role == 'admin')
         else:
-            # ถ้าเป็น JWT token ของ Supabase
-            response = supabase_client.auth.get_user(token)
-            
-            if hasattr(response, 'error') and response.error:
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Token ไม่ถูกต้องหรือหมดอายุ"
-                )
-            
-            user_id = response.user.id
-            
+            # ถ้าไม่ใช่ session token ที่ถูกต้อง
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token ไม่ถูกต้องหรือหมดอายุ"
+            )
+        
+        if not is_admin:
             # ตรวจสอบว่าเป็น admin หรือไม่
             is_admin_result = supabase_client.rpc(
                 'is_admin',
                 {'user_id': user_id}
             ).execute()
             
-            if is_admin_result.data:
-                is_admin = is_admin_result.data
+            if is_admin_result.data and len(is_admin_result.data) > 0:
+                is_admin = is_admin_result.data[0]
         
         if not is_admin:
             raise HTTPException(
@@ -458,7 +454,7 @@ async def update_user_role(role_update: UserRoleUpdate, token: str, request: Req
         ).execute()
         
         if hasattr(result, 'error') and result.error:
-            raise Exception(f"Error updating role: {result.error.message}")
+            raise Exception(f"Error updating role: {result.error}")
         
         # บันทึกกิจกรรม
         supabase_client.rpc(
@@ -466,9 +462,9 @@ async def update_user_role(role_update: UserRoleUpdate, token: str, request: Req
             {
                 'p_user_id': user_id,
                 'p_action': 'update_role',
-                'p_table_name': 'user_roles',
+                'p_table_name': 'users',
                 'p_record_id': role_update.user_id,
-                'p_description': f'อัพเดท role ของผู้ใช้ {role_update.user_id} เป็น {role_update.role}',
+                'p_description': f'อัพเดท role ของผู้ใช้เป็น {role_update.role}',
                 'p_ip_address': request.client.host if request.client else None,
                 'p_user_agent': request.headers.get("user-agent")
             }
@@ -489,9 +485,9 @@ async def change_password(password_data: ChangePassword, token: str, request: Re
     """เปลี่ยนรหัสผ่าน"""
     try:
         user_id = None
-        user_email = None
+        username = None
         
-        # ตรวจสอบว่าเป็น session token หรือไม่
+        # ตรวจสอบ session token
         session_data = supabase_client.rpc(
             'validate_session',
             {'p_session_token': token}
@@ -500,44 +496,30 @@ async def change_password(password_data: ChangePassword, token: str, request: Re
         if session_data.data and session_data.data[0]['is_valid']:
             # ถ้าเป็น session token
             user_id = session_data.data[0]['user_id']
-            
-            # ดึงข้อมูลผู้ใช้จาก auth.users
-            user_data = supabase_client.table("auth.users").select("*").eq("id", user_id).single().execute()
-            
-            if user_data.data:
-                user_email = user_data.data["email"]
+            username = session_data.data[0]['username']
         else:
-            # ถ้าเป็น JWT token ของ Supabase
-            response = supabase_client.auth.get_user(token)
-            
-            if hasattr(response, 'error') and response.error:
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Token ไม่ถูกต้องหรือหมดอายุ"
-                )
-            
-            user_id = response.user.id
-            user_email = response.user.email
+            # ถ้าไม่ใช่ session token ที่ถูกต้อง
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token ไม่ถูกต้องหรือหมดอายุ"
+            )
         
-        if not user_id or not user_email:
+        if not user_id or not username:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="ไม่สามารถระบุตัวตนผู้ใช้ได้"
             )
         
         # ตรวจสอบรหัสผ่านปัจจุบัน
-        try:
-            login_response = supabase_client.auth.sign_in_with_password({
-                "email": user_email,
-                "password": password_data.current_password
-            })
-            
-            if hasattr(login_response, 'error') and login_response.error:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="รหัสผ่านปัจจุบันไม่ถูกต้อง"
-                )
-        except Exception:
+        login_check = supabase_client.rpc(
+            'login_user',
+            {
+                'p_username': username,
+                'p_password': password_data.current_password
+            }
+        ).execute()
+        
+        if not login_check.data or not login_check.data[0].get('login_success'):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="รหัสผ่านปัจจุบันไม่ถูกต้อง"
@@ -550,30 +532,34 @@ async def change_password(password_data: ChangePassword, token: str, request: Re
                 detail="รหัสผ่านใหม่ต้องมีความยาวอย่างน้อย 6 ตัวอักษร"
             )
         
-        # เปลี่ยนรหัสผ่าน
-        update_response = supabase_client.auth.admin.update_user_by_id(
-            user_id,
-            {"password": password_data.new_password}
-        )
+        # เข้ารหัสรหัสผ่านใหม่
+        hashed_password = supabase_client.rpc(
+            'hash_password',
+            {
+                'password': password_data.new_password
+            }
+        ).execute()
         
-        if hasattr(update_response, 'error') and update_response.error:
+        if not hashed_password.data:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"การเปลี่ยนรหัสผ่านล้มเหลว: {update_response.error.message}"
+                detail="ไม่สามารถเข้ารหัสรหัสผ่านได้"
+            )
+        
+        # อัปเดตรหัสผ่าน
+        update_result = supabase_client.table("users").update({
+            "password_hash": hashed_password.data[0],
+            "updated_at": "now()"
+        }).eq("id", user_id).execute()
+        
+        if hasattr(update_result, 'error') and update_result.error:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"การเปลี่ยนรหัสผ่านล้มเหลว: {update_result.error}"
             )
         
         # ออกจากระบบทุกอุปกรณ์ยกเว้นอุปกรณ์ปัจจุบัน
-        if hasattr(session_data, 'data') and session_data.data and session_data.data[0]['is_valid']:
-            current_session_token = token
-            
-            # ยกเลิก session ทั้งหมดยกเว้น session ปัจจุบัน
-            supabase_client.table("user_sessions").delete().eq("user_id", user_id).neq("session_token", current_session_token).execute()
-        else:
-            # ยกเลิก session ทั้งหมด
-            supabase_client.rpc(
-                'end_all_user_sessions',
-                {'p_user_id': user_id}
-            ).execute()
+        supabase_client.table("user_sessions").delete().eq("user_id", user_id).neq("session_token", token).execute()
         
         # บันทึกกิจกรรม
         supabase_client.rpc(
@@ -603,7 +589,7 @@ async def get_user_sessions(token: str):
     try:
         user_id = None
         
-        # ตรวจสอบว่าเป็น session token หรือไม่
+        # ตรวจสอบ session token
         session_data = supabase_client.rpc(
             'validate_session',
             {'p_session_token': token}
@@ -613,16 +599,11 @@ async def get_user_sessions(token: str):
             # ถ้าเป็น session token
             user_id = session_data.data[0]['user_id']
         else:
-            # ถ้าเป็น JWT token ของ Supabase
-            response = supabase_client.auth.get_user(token)
-            
-            if hasattr(response, 'error') and response.error:
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Token ไม่ถูกต้องหรือหมดอายุ"
-                )
-            
-            user_id = response.user.id
+            # ถ้าไม่ใช่ session token ที่ถูกต้อง
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token ไม่ถูกต้องหรือหมดอายุ"
+            )
         
         if not user_id:
             raise HTTPException(
@@ -636,7 +617,7 @@ async def get_user_sessions(token: str):
         ).eq("user_id", user_id).order("created_at", desc=True).execute()
         
         if hasattr(sessions, 'error') and sessions.error:
-            raise Exception(f"Error fetching sessions: {sessions.error.message}")
+            raise Exception(f"Error fetching sessions: {sessions.error}")
         
         return sessions.data
     except HTTPException:
@@ -654,7 +635,7 @@ async def delete_session(session_id: str, token: str, request: Request):
     try:
         user_id = None
         
-        # ตรวจสอบว่าเป็น session token หรือไม่
+        # ตรวจสอบ session token
         session_data = supabase_client.rpc(
             'validate_session',
             {'p_session_token': token}
@@ -664,16 +645,11 @@ async def delete_session(session_id: str, token: str, request: Request):
             # ถ้าเป็น session token
             user_id = session_data.data[0]['user_id']
         else:
-            # ถ้าเป็น JWT token ของ Supabase
-            response = supabase_client.auth.get_user(token)
-            
-            if hasattr(response, 'error') and response.error:
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Token ไม่ถูกต้องหรือหมดอายุ"
-                )
-            
-            user_id = response.user.id
+            # ถ้าไม่ใช่ session token ที่ถูกต้อง
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token ไม่ถูกต้องหรือหมดอายุ"
+            )
         
         if not user_id:
             raise HTTPException(
@@ -694,7 +670,7 @@ async def delete_session(session_id: str, token: str, request: Request):
         delete_result = supabase_client.table("user_sessions").delete().eq("id", session_id).eq("user_id", user_id).execute()
         
         if hasattr(delete_result, 'error') and delete_result.error:
-            raise Exception(f"Error deleting session: {delete_result.error.message}")
+            raise Exception(f"Error deleting session: {delete_result.error}")
         
         # บันทึกกิจกรรม
         supabase_client.rpc(
@@ -727,7 +703,7 @@ async def get_activity_logs(token: str, limit: int = 100):
         user_id = None
         is_admin = False
         
-        # ตรวจสอบว่าเป็น session token หรือไม่
+        # ตรวจสอบ session token
         session_data = supabase_client.rpc(
             'validate_session',
             {'p_session_token': token}
@@ -736,28 +712,24 @@ async def get_activity_logs(token: str, limit: int = 100):
         if session_data.data and session_data.data[0]['is_valid']:
             # ถ้าเป็น session token
             user_id = session_data.data[0]['user_id']
-            role = session_data.data[0]['role']
+            role = session_data.data[0]['user_role']
             is_admin = (role == 'admin')
         else:
-            # ถ้าเป็น JWT token ของ Supabase
-            response = supabase_client.auth.get_user(token)
-            
-            if hasattr(response, 'error') and response.error:
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Token ไม่ถูกต้องหรือหมดอายุ"
-                )
-            
-            user_id = response.user.id
-            
+            # ถ้าไม่ใช่ session token ที่ถูกต้อง
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token ไม่ถูกต้องหรือหมดอายุ"
+            )
+        
+        if not is_admin:
             # ตรวจสอบว่าเป็น admin หรือไม่
             is_admin_result = supabase_client.rpc(
                 'is_admin',
                 {'user_id': user_id}
             ).execute()
             
-            if is_admin_result.data:
-                is_admin = is_admin_result.data
+            if is_admin_result.data and len(is_admin_result.data) > 0:
+                is_admin = is_admin_result.data[0]
         
         if not user_id:
             raise HTTPException(
@@ -775,7 +747,7 @@ async def get_activity_logs(token: str, limit: int = 100):
         logs = query.order("created_at", desc=True).limit(limit).execute()
         
         if hasattr(logs, 'error') and logs.error:
-            raise Exception(f"Error fetching activity logs: {logs.error.message}")
+            raise Exception(f"Error fetching activity logs: {logs.error}")
         
         return logs.data
     except HTTPException:

@@ -67,7 +67,7 @@ def format_timestamp_thai(timestamp):
     return local_dt.strftime("%d/%m/%Y %H:%M:%S")
 
 async def add_plate(plate_number, province=None, id_camera=None, camera_name=None, user_id=None, timestamp=None):
-    """เพิ่มทะเบียนไปที่ Supabase ด้วย async"""
+    """เพิ่มทะเบียนไปที่ฐานข้อมูลด้วย async"""
     global last_db_access
     
     # สร้าง timestamp ในรูปแบบที่ถูกต้อง
@@ -109,8 +109,8 @@ async def add_plate(plate_number, province=None, id_camera=None, camera_name=Non
         last_db_access = time.time()
         
         if hasattr(response, 'error') and response.error:
-            logger.error(f"Supabase Error: {response.error}")
-            raise Exception(f"Supabase Error: {response.error}")
+            logger.error(f"Database Error: {response.error}")
+            raise Exception(f"Database Error: {response.error}")
         
         # ล้าง cache เพื่อให้ข้อมูลเป็นปัจจุบัน
         if plate_number in plates_cache:
@@ -119,18 +119,13 @@ async def add_plate(plate_number, province=None, id_camera=None, camera_name=Non
         all_plates_cache.clear()
         alerts_cache.clear()  # ล้าง cache การแจ้งเตือนด้วยเพราะอาจมีการแจ้งเตือนใหม่
         
-        # ตรวจสอบว่าทะเบียนนี้อยู่ในรายการติดตามหรือไม่
-        try:
-            # ไม่ต้องบล็อกการทำงาน เพราะ trigger จะทำงานอัตโนมัติในฐานข้อมูล
-            # เพียงแค่ล้าง cache การแจ้งเตือนเพื่อให้แน่ใจว่าจะได้ข้อมูลล่าสุด
-            alerts_cache.clear()
-        except Exception as alert_error:
-            logger.error(f"Error checking watchlist: {alert_error}")
+        # ไม่ต้องทำเพิ่มเติม เพราะ trigger ทำงานในฐานข้อมูลอยู่แล้ว
+        # trigger_create_alert_from_plate จะทำงานอัตโนมัติ
         
-        logger.info(f"Added plate to Supabase: {plate_number}")
+        logger.info(f"Added plate to database: {plate_number}")
         return True
     except Exception as e:
-        logger.error(f"Supabase Exception: {e}")
+        logger.error(f"Database Exception: {e}")
         raise
 
 async def search_plates(
@@ -143,9 +138,9 @@ async def search_plates(
     end_year=None,
     start_hour=None,
     end_hour=None,
-    province=None,      # เพิ่มพารามิเตอร์จังหวัด
-    id_camera=None,     # เพิ่มพารามิเตอร์ ID กล้อง
-    camera_name=None,   # เพิ่มพารามิเตอร์ชื่อกล้อง
+    province=None,
+    id_camera=None,
+    camera_name=None,
     limit=MAX_RECORDS
 ):
     """
@@ -274,7 +269,7 @@ async def search_plates(
         last_db_access = time.time()
         
         if hasattr(response, 'error') and response.error:
-            logger.error(f"Supabase Search Error: {response.error}")
+            logger.error(f"Database Search Error: {response.error}")
             return []
         
         # ตรวจสอบการกรองตามช่วงเวลา
@@ -326,11 +321,11 @@ async def search_plates(
         logger.info(f"Search results: {len(result)} plates found")
         return result
     except Exception as e:
-        logger.error(f"Supabase Search Exception: {e}")
+        logger.error(f"Database Search Exception: {e}")
         return []
 
 async def get_plates():
-    """ดึงทะเบียนทั้งหมดจาก Supabase (จำกัด 1000 รายการล่าสุด)"""
+    """ดึงทะเบียนทั้งหมดจากฐานข้อมูล (จำกัด 1000 รายการล่าสุด)"""
     global last_db_access
     
     # ตรวจสอบว่ามี cache หรือไม่
@@ -373,7 +368,7 @@ async def get_plates():
         logger.info(f"Retrieved all plates, count: {len(result)}")
         return result
     except Exception as e:
-        logger.error(f"Supabase Get Plates Error: {e}")
+        logger.error(f"Database Get Plates Error: {e}")
         return []
 
 async def get_plate(plate_number):
@@ -417,32 +412,12 @@ async def get_cameras():
         # ดำเนินการแบบ non-blocking
         loop = asyncio.get_event_loop()
         
-        # ตรวจสอบว่ามีตาราง cameras หรือไม่
-        try:
-            response = await loop.run_in_executor(
-                None, 
-                lambda: supabase_client.table("cameras")
-                        .select("*")
-                        .order('name')
-                        .execute()
-            )
-            
-            # บันทึกเวลาการเข้าถึงฐานข้อมูลล่าสุด
-            last_db_access = time.time()
-            
-            if not hasattr(response, 'error') and response.data:
-                # เก็บผลลัพธ์ใน cache
-                camera_cache['cameras'] = response.data
-                logger.info(f"Retrieved cameras from table cameras, count: {len(response.data)}")
-                return response.data
-        except Exception as camera_error:
-            logger.warning(f"Error fetching from cameras table, falling back to plates table: {str(camera_error)}")
-        
-        # ถ้าไม่สามารถดึงจากตาราง cameras ได้ ให้ดึงกล้องจากตาราง plates แทน
+        # ดึงข้อมูลจากตาราง cameras
         response = await loop.run_in_executor(
             None, 
-            lambda: supabase_client.table("plates")
-                    .select("id_camera, camera_name")
+            lambda: supabase_client.table("cameras")
+                    .select("*")
+                    .order('name')
                     .execute()
         )
         
@@ -450,26 +425,16 @@ async def get_cameras():
         last_db_access = time.time()
         
         if hasattr(response, 'error') and response.error:
-            logger.error(f"Supabase Get Cameras Error: {response.error}")
+            logger.error(f"Database Get Cameras Error: {response.error}")
             return []
         
-        # กรองเฉพาะข้อมูลที่ไม่ซ้ำกัน
-        cameras = {}
-        for item in response.data or []:
-            if item.get("id_camera") and item.get("camera_name"):
-                cameras[item["id_camera"]] = {
-                    "id_camera": item["id_camera"],
-                    "camera_name": item["camera_name"]
-                }
-        
-        result = list(cameras.values())
         # เก็บผลลัพธ์ใน cache
-        camera_cache['cameras'] = result
+        camera_cache['cameras'] = response.data or []
         
-        logger.info(f"Retrieved cameras from plates table, count: {len(result)}")
-        return result
+        logger.info(f"Retrieved cameras, count: {len(response.data or [])}")
+        return response.data or []
     except Exception as e:
-        logger.error(f"Supabase Get Cameras Error: {e}")
+        logger.error(f"Database Get Cameras Error: {e}")
         return []
 
 async def get_watchlists(user_id=None, is_admin=False):
@@ -508,7 +473,7 @@ async def get_watchlists(user_id=None, is_admin=False):
         last_db_access = time.time()
         
         if hasattr(response, 'error') and response.error:
-            logger.error(f"Supabase Get Watchlists Error: {response.error}")
+            logger.error(f"Database Get Watchlists Error: {response.error}")
             return []
         
         # เก็บผลลัพธ์ใน cache
@@ -538,15 +503,17 @@ async def get_alerts(status=None):
         if current_time - last_db_access < min_db_access_interval:
             await asyncio.sleep(min_db_access_interval)
         
-        # สร้าง query
-        query = supabase_client.table("alerts").select("*, plates(*), watchlists(*)")
+        # สร้าง query รวม Join tables
+        query = supabase_client.table("alerts").select(
+            "id, status, notes, handled_by, created_at, updated_at, plate_id, watchlist_id"
+        )
         
         if status:
             query = query.eq("status", status)
         
         # ดำเนินการแบบ non-blocking
         loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(
+        alerts_response = await loop.run_in_executor(
             None, 
             lambda: query.order('created_at', desc=True).execute()
         )
@@ -554,26 +521,39 @@ async def get_alerts(status=None):
         # บันทึกเวลาการเข้าถึงฐานข้อมูลล่าสุด
         last_db_access = time.time()
         
-        if hasattr(response, 'error') and response.error:
-            logger.error(f"Supabase Get Alerts Error: {response.error}")
+        if hasattr(alerts_response, 'error') and alerts_response.error:
+            logger.error(f"Database Get Alerts Error: {alerts_response.error}")
             return []
         
-        # แปลงรูปแบบวันที่สำหรับการแสดงผล
+        # สร้างรายการ alerts พร้อมข้อมูลที่เกี่ยวข้อง
         result = []
-        for item in response.data or []:
-            # ทำสำเนาข้อมูล
-            formatted_item = item.copy()
-            # แปลง timestamp เป็นรูปแบบไทย
-            formatted_item["created_at"] = format_timestamp_thai(item.get("created_at"))
-            formatted_item["updated_at"] = format_timestamp_thai(item.get("updated_at"))
+        for alert in alerts_response.data or []:
+            enhanced_alert = alert.copy()
             
-            # แปลง timestamp ในข้อมูลที่เชื่อมโยง
-            if "plates" in formatted_item and formatted_item["plates"]:
-                formatted_item["plates"]["timestamp"] = format_timestamp_thai(
-                    formatted_item["plates"].get("timestamp")
+            # ดึงข้อมูล plate
+            if alert.get("plate_id"):
+                plate_response = await loop.run_in_executor(
+                    None, 
+                    lambda: supabase_client.table("plates").select("*").eq("id", alert["plate_id"]).single().execute()
                 )
+                if plate_response.data:
+                    enhanced_alert["plate"] = plate_response.data
+                    enhanced_alert["plate"]["timestamp"] = format_timestamp_thai(enhanced_alert["plate"].get("timestamp"))
             
-            result.append(formatted_item)
+            # ดึงข้อมูล watchlist
+            if alert.get("watchlist_id"):
+                watchlist_response = await loop.run_in_executor(
+                    None, 
+                    lambda: supabase_client.table("watchlists").select("*").eq("id", alert["watchlist_id"]).single().execute()
+                )
+                if watchlist_response.data:
+                    enhanced_alert["watchlist"] = watchlist_response.data
+            
+            # แปลง timestamp
+            enhanced_alert["created_at"] = format_timestamp_thai(alert.get("created_at"))
+            enhanced_alert["updated_at"] = format_timestamp_thai(alert.get("updated_at"))
+            
+            result.append(enhanced_alert)
         
         # เก็บผลลัพธ์ใน cache
         alerts_cache[cache_key] = result
@@ -605,7 +585,7 @@ async def get_system_settings():
         last_db_access = time.time()
         
         if hasattr(response, 'error') and response.error:
-            logger.error(f"Supabase Get System Settings Error: {response.error}")
+            logger.error(f"Database Get System Settings Error: {response.error}")
             return {}
         
         # แปลงข้อมูลเป็นรูปแบบ key-value
@@ -659,103 +639,13 @@ async def set_setting(key, value, description=None):
         last_db_access = time.time()
         
         if hasattr(response, 'error') and response.error:
-            logger.error(f"Supabase Set Setting Error: {response.error}")
+            logger.error(f"Database Set Setting Error: {response.error}")
             return False
         
         logger.info(f"Set system setting: {key} = {value}")
         return True
     except Exception as e:
         logger.error(f"Set Setting Exception: {key}, {e}")
-        return False
-
-async def get_activity_logs(user_id=None, limit=100, is_admin=False):
-    """ดึงประวัติการทำงานในระบบ"""
-    global last_db_access
-    
-    try:
-        # ป้องกันการเรียกฐานข้อมูลถี่เกินไป
-        current_time = time.time()
-        if current_time - last_db_access < min_db_access_interval:
-            await asyncio.sleep(min_db_access_interval)
-        
-        # สร้าง query
-        query = supabase_client.table("activity_logs").select("*")
-        
-        if not is_admin and user_id:
-            # ถ้าไม่ใช่ admin ให้ดึงเฉพาะรายการของตัวเอง
-            query = query.eq("user_id", user_id)
-        
-        # จำกัดจำนวนผลลัพธ์
-        query = query.limit(limit)
-        
-        # เรียงลำดับตามวันที่ล่าสุด
-        query = query.order('created_at', desc=True)
-        
-        # ดำเนินการแบบ non-blocking
-        loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(None, lambda: query.execute())
-        
-        # บันทึกเวลาการเข้าถึงฐานข้อมูลล่าสุด
-        last_db_access = time.time()
-        
-        if hasattr(response, 'error') and response.error:
-            logger.error(f"Supabase Get Activity Logs Error: {response.error}")
-            return []
-        
-        # แปลงรูปแบบวันที่สำหรับการแสดงผล
-        result = []
-        for item in response.data or []:
-            # ทำสำเนาข้อมูล
-            formatted_item = item.copy()
-            # แปลง timestamp เป็นรูปแบบไทย
-            formatted_item["created_at"] = format_timestamp_thai(item.get("created_at"))
-            result.append(formatted_item)
-        
-        logger.info(f"Retrieved activity logs, count: {len(result)}")
-        return result
-    except Exception as e:
-        logger.error(f"Get Activity Logs Exception: {e}")
-        return []
-
-async def log_activity(user_id, action, table_name=None, record_id=None, description=None, ip_address=None, user_agent=None):
-    """บันทึกกิจกรรมการทำงานในระบบ"""
-    global last_db_access
-    
-    try:
-        # ป้องกันการเรียกฐานข้อมูลถี่เกินไป
-        current_time = time.time()
-        if current_time - last_db_access < min_db_access_interval:
-            await asyncio.sleep(min_db_access_interval)
-        
-        # ดำเนินการแบบ non-blocking
-        loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(
-            None, 
-            lambda: supabase_client.rpc(
-                'log_activity',
-                {
-                    'p_user_id': user_id,
-                    'p_action': action,
-                    'p_table_name': table_name,
-                    'p_record_id': record_id,
-                    'p_description': description,
-                    'p_ip_address': ip_address,
-                    'p_user_agent': user_agent
-                }
-            ).execute()
-        )
-        
-        # บันทึกเวลาการเข้าถึงฐานข้อมูลล่าสุด
-        last_db_access = time.time()
-        
-        if hasattr(response, 'error') and response.error:
-            logger.error(f"Supabase Log Activity Error: {response.error}")
-            return False
-        
-        logger.info(f"Logged activity: {action} by {user_id}")
-        return True
-    except Exception as e:
-        logger.error(f"Log Activity Exception: {e}")
         return False
 
 async def clear_caches():
