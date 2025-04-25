@@ -8,3 +8,5 @@ pydantic==2.4.2
 python-multipart==0.0.6
 httpx==0.24.1
 cachetools
+python-jose[cryptography]==3.3.0
+passlib==1.7.4
