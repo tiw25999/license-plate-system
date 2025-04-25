@@ -172,17 +172,54 @@ async def logout(request: Request):
     return {"message": "ออกจากระบบสำเร็จ"}
 
 @auth_router.get("/me", response_model=UserInfo)
-async def get_current_user(request: Request, user = Depends(verify_token)):
+async def get_current_user(request: Request):
     """ดึงข้อมูลผู้ใช้ปัจจุบัน"""
-    if not user:
+    try:
+        # ดึง token จาก header
+        auth_header = request.headers.get("Authorization")
+        if not auth_header or not auth_header.startswith("Bearer "):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="ไม่ได้เข้าสู่ระบบ"
+            )
+        
+        token = auth_header.split(" ")[1]
+        
+        # ตรวจสอบ JWT token
+        payload = decode_access_token(token)
+        if not payload:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token ไม่ถูกต้องหรือหมดอายุ"
+            )
+        
+        # ดึงข้อมูลผู้ใช้จากฐานข้อมูล
+        user_id = payload.get("sub")
+        if not user_id:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token ไม่ถูกต้อง"
+            )
+            
+        user_data = supabase_client.table("users").select("*").eq("id", user_id).single().execute()
+        
+        if not user_data.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="ไม่พบข้อมูลผู้ใช้"
+            )
+        
+        return {
+            "id": user_data.data.get("id"),
+            "username": user_data.data.get("username"),
+            "email": user_data.data.get("email"),
+            "role": user_data.data.get("role")
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting current user: {str(e)}")
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="ไม่ได้เข้าสู่ระบบ"
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"เกิดข้อผิดพลาด: {str(e)}"
         )
-    
-    return {
-        "id": user.get("id"),
-        "username": user.get("username"),
-        "email": user.get("email"),
-        "role": user.get("role")
-    }
