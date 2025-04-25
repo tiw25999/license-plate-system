@@ -106,6 +106,7 @@ async def signup(user: UserSignUp, request: Request):
             detail=f"เกิดข้อผิดพลาดในการสมัครสมาชิก: {str(e)}"
         )
 
+# แก้ไขในไฟล์ auth.py เฉพาะในส่วน login
 @auth_router.post("/login", response_model=UserResponse)
 async def login(user: UserLogin, request: Request):
     """เข้าสู่ระบบ"""
@@ -132,20 +133,26 @@ async def login(user: UserLogin, request: Request):
         email = response.data[0]['email']
         role = response.data[0]['role']
         
-        # สร้าง session ใหม่
-        session_data = supabase_client.rpc(
-            'create_user_session',
-            {
-                'p_user_id': user_id,
-                'p_ip_address': request.client.host if request.client else None,
-                'p_user_agent': request.headers.get("user-agent")
-            }
-        ).execute()
+        # สร้าง session token โดยตรง (แทนที่จะใช้ฟังก์ชัน create_user_session)
+        import secrets
+        from datetime import datetime, timedelta
+        import pytz
         
-        session_token = None
-        if session_data.data and len(session_data.data) > 0:
-            session_token = session_data.data[0]['session_token']
-            
+        # สร้าง session token
+        session_token = secrets.token_hex(32)
+        # สร้างเวลาหมดอายุ (7 วัน)
+        thailand_tz = pytz.timezone('Asia/Bangkok')
+        expires_at = datetime.now(thailand_tz) + timedelta(days=7)
+        
+        # บันทึกข้อมูล session
+        session_data = supabase_client.table("user_sessions").insert({
+            "user_id": user_id,
+            "session_token": session_token,
+            "expires_at": expires_at.isoformat(),
+            "ip_address": request.client.host if request.client else None,
+            "user_agent": request.headers.get("user-agent")
+        }).execute()
+        
         # บันทึกกิจกรรม
         supabase_client.rpc(
             'log_activity',
