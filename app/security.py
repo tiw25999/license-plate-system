@@ -9,7 +9,7 @@ import uuid
 # รหัสลับสำหรับสร้าง JWT (ควรเก็บในตัวแปรแวดล้อม)
 SECRET_KEY = os.environ.get("JWT_SECRET_KEY", "your-secret-key-change-it")
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 30    # 30 วัน
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 30  # แก้ไขเป็น 30 วัน
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 

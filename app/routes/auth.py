@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Request
 from app.schemas import UserLogin, UserSignUp, UserResponse, UserRoleUpdate, UserInfo, ChangePassword
 from app.config import supabase_client
 from app.security import verify_password, get_password_hash, create_access_token
-from app.middleware import verify_token  # แก้ไขการนำเข้า verify_token จาก middleware
+from app.middleware import verify_token, require_auth, require_admin
 from typing import Optional, List
 from app.security import decode_access_token
 import logging
@@ -72,7 +72,7 @@ async def signup(user: UserSignUp, request: Request):
             "username": user.username,
             "role": "member"
         }
-        access_token = create_access_token(token_data, timedelta(days=7))
+        access_token = create_access_token(token_data, timedelta(days=30))  # เพิ่มเป็น 30 วัน
         
         # บันทึกกิจกรรม
         supabase_client.rpc(
@@ -136,7 +136,7 @@ async def login(user: UserLogin, request: Request):
             "username": username,
             "role": role
         }
-        access_token = create_access_token(token_data, timedelta(days=7))
+        access_token = create_access_token(token_data, timedelta(days=30))  # เพิ่มเป็น 30 วัน
         
         # บันทึกกิจกรรม
         supabase_client.rpc(
@@ -220,6 +220,95 @@ async def get_current_user(request: Request):
         raise
     except Exception as e:
         logger.error(f"Error getting current user: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"เกิดข้อผิดพลาด: {str(e)}"
+        )
+
+@auth_router.get("/users")
+async def get_users(request: Request, user = Depends(require_admin)):
+    """ดึงรายชื่อผู้ใช้ทั้งหมด (สำหรับ admin เท่านั้น)"""
+    try:
+        # ดึงข้อมูลผู้ใช้ทั้งหมดจากฐานข้อมูล
+        response = supabase_client.table("users").select("*").execute()
+        
+        if hasattr(response, 'error') and response.error:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Database Error: {response.error}"
+            )
+        
+        # ส่งข้อมูลกลับไป (ไม่รวมรหัสผ่าน)
+        users = []
+        for user_data in response.data:
+            user_info = {
+                "id": user_data.get("id"),
+                "username": user_data.get("username"),
+                "email": user_data.get("email"),
+                "role": user_data.get("role"),
+                "created_at": user_data.get("created_at")
+            }
+            users.append(user_info)
+        
+        return users
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting users: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"เกิดข้อผิดพลาด: {str(e)}"
+        )
+
+@auth_router.post("/update-role")
+async def update_user_role(role_update: UserRoleUpdate, request: Request, user = Depends(require_admin)):
+    """อัพเดทสิทธิ์ผู้ใช้ (สำหรับ admin เท่านั้น)"""
+    try:
+        # ตรวจสอบว่า role ถูกต้องหรือไม่
+        if role_update.role not in ["admin", "member"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="สิทธิ์ไม่ถูกต้อง (ต้องเป็น 'admin' หรือ 'member')"
+            )
+        
+        # อัพเดทสิทธิ์ผู้ใช้
+        response = supabase_client.table("users").update(
+            {"role": role_update.role}
+        ).eq("id", role_update.user_id).execute()
+        
+        if hasattr(response, 'error') and response.error:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Database Error: {response.error}"
+            )
+        
+        # ตรวจสอบว่ามีการอัพเดทข้อมูลหรือไม่
+        if not response.data or len(response.data) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="ไม่พบผู้ใช้ที่ระบุ"
+            )
+        
+        # บันทึกกิจกรรม
+        admin_id = user.get('id') if isinstance(user, dict) else user.id
+        supabase_client.rpc(
+            'log_activity',
+            {
+                'p_user_id': admin_id,
+                'p_action': 'update_role',
+                'p_table_name': 'users',
+                'p_record_id': role_update.user_id,
+                'p_description': f'อัพเดทสิทธิ์ผู้ใช้ ID {role_update.user_id} เป็น {role_update.role}',
+                'p_ip_address': request.client.host if request.client else None,
+                'p_user_agent': request.headers.get("user-agent")
+            }
+        ).execute()
+        
+        return {"message": "อัพเดทสิทธิ์ผู้ใช้สำเร็จ", "user_id": role_update.user_id, "role": role_update.role}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating user role: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"เกิดข้อผิดพลาด: {str(e)}"
