@@ -314,17 +314,18 @@ async def create_user(user_data: UserCreate, request: Request, current_user = De
                 detail="ไม่พบข้อมูลผู้ใช้หลังจากลงทะเบียน"
             )
         
-        # บันทึกกิจกรรม - แก้ไขให้ดีขึ้น
+        # บันทึกกิจกรรม
         try:
             admin_id = current_user.get('id') if isinstance(current_user, dict) else current_user.id
-            
-            # ส่งพารามิเตอร์ที่จำเป็นเท่านั้น ไม่ส่ง p_record_id 
+    
+            # ไม่ส่ง p_record_id ไปเลย
             supabase_client.rpc(
                 'log_activity',
                 {
                     'p_user_id': admin_id,
                     'p_action': 'create_user',
                     'p_table_name': 'users',
+                    # ไม่มี p_record_id อยู่ในนี้
                     'p_description': f'สร้างผู้ใช้ใหม่: {user_data.username}',
                     'p_ip_address': request.client.host if request.client else None,
                     'p_user_agent': request.headers.get("user-agent")
