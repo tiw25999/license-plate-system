@@ -221,27 +221,26 @@ async def update_user_role(role_update: UserRoleUpdate, request: Request, user =
         
         # แก้ไขการส่ง record_id
         try:
-            # ตรวจสอบว่า role_update.user_id เป็น UUID ที่ถูกต้อง
-            valid_user_id = None
-            try:
-                if role_update.user_id:
-                    valid_user_id = str(uuid.UUID(role_update.user_id))
-            except (ValueError, TypeError):
-                logger.warning(f"Invalid UUID format for user_id: {role_update.user_id}")
-                valid_user_id = None
+            # สร้างพารามิเตอร์สำหรับ log_activity โดยไม่รวม p_record_id
+            log_params = {
+                'p_user_id': admin_id,
+                'p_action': 'update_role',
+                'p_table_name': 'users',
+                'p_description': f'อัพเดทสิทธิ์ผู้ใช้ ID {role_update.user_id} เป็น {role_update.role}',
+                'p_ip_address': request.client.host if request.client else None,
+                'p_user_agent': request.headers.get("user-agent")
+            }
             
-            supabase_client.rpc(
-                'log_activity',
-                {
-                    'p_user_id': admin_id,
-                    'p_action': 'update_role',
-                    'p_table_name': 'users',
-                    'p_record_id': valid_user_id,
-                    'p_description': f'อัพเดทสิทธิ์ผู้ใช้ ID {role_update.user_id} เป็น {role_update.role}',
-                    'p_ip_address': request.client.host if request.client else None,
-                    'p_user_agent': request.headers.get("user-agent")
-                }
-            ).execute()
+            # ทดลองเพิ่ม record_id ถ้ามีการตรวจสอบแล้วว่าเป็น UUID ที่ถูกต้อง
+            try:
+                if role_update.user_id and isinstance(role_update.user_id, str):
+                    uuid_obj = uuid.UUID(role_update.user_id)
+                    log_params['p_record_id'] = str(uuid_obj)
+            except (ValueError, TypeError):
+                # ถ้าแปลงไม่ได้ ไม่ต้องใส่ p_record_id
+                logger.warning(f"Invalid UUID format for user_id: {role_update.user_id}")
+            
+            supabase_client.rpc('log_activity', log_params).execute()
         except Exception as log_err:
             logger.error(f"Error logging role update activity: {str(log_err)}")
         
@@ -326,17 +325,7 @@ async def create_user(user_data: UserCreate, request: Request, current_user = De
         try:
             admin_id = current_user.get('id') if isinstance(current_user, dict) else current_user.id
             
-            # ตรวจสอบว่า user_id เป็น UUID ที่ถูกต้อง
-            valid_user_id = None
-            try:
-                if user_id and isinstance(user_id, str):
-                    # ลอง parse เป็น UUID เพื่อตรวจสอบความถูกต้อง
-                    valid_user_id = str(uuid.UUID(user_id))
-            except (ValueError, TypeError):
-                logger.warning(f"Invalid UUID format for user_id: {user_id}")
-                valid_user_id = None
-            
-            # ไม่ใส่ record_id ถ้าไม่ใช่ UUID ที่ถูกต้อง
+            # สร้างพารามิเตอร์โดยไม่รวม p_record_id
             log_params = {
                 'p_user_id': admin_id,
                 'p_action': 'create_user',
@@ -346,9 +335,8 @@ async def create_user(user_data: UserCreate, request: Request, current_user = De
                 'p_user_agent': request.headers.get("user-agent")
             }
             
-            # เพิ่ม record_id เฉพาะเมื่อเป็น UUID ที่ถูกต้อง
-            if valid_user_id:
-                log_params['p_record_id'] = valid_user_id
+            # ลดโค้ดที่พยายามจัดการกับ UUID เพื่อหลีกเลี่ยงความผิดพลาด
+            # ไม่จำเป็นต้องส่ง p_record_id ในการบันทึกกิจกรรมนี้
             
             supabase_client.rpc('log_activity', log_params).execute()
         except Exception as log_err:
@@ -403,16 +391,7 @@ async def delete_user(user_data: UserDelete, request: Request, current_user = De
         
         # บันทึกกิจกรรม - แก้ไขการเรียกใช้ log_activity
         try:
-            # ตรวจสอบว่า user_data.user_id เป็น UUID ที่ถูกต้อง
-            valid_user_id = None
-            try:
-                if user_data.user_id:
-                    valid_user_id = str(uuid.UUID(user_data.user_id))
-            except (ValueError, TypeError):
-                logger.warning(f"Invalid UUID format for user_id to delete: {user_data.user_id}")
-                valid_user_id = None
-            
-            # สร้างพารามิเตอร์สำหรับ log_activity
+            # สร้างพารามิเตอร์โดยไม่รวม p_record_id
             log_params = {
                 'p_user_id': admin_id,
                 'p_action': 'delete_user',
@@ -422,9 +401,8 @@ async def delete_user(user_data: UserDelete, request: Request, current_user = De
                 'p_user_agent': request.headers.get("user-agent")
             }
             
-            # เพิ่ม record_id เฉพาะเมื่อเป็น UUID ที่ถูกต้อง
-            if valid_user_id:
-                log_params['p_record_id'] = valid_user_id
+            # ลดโค้ดที่พยายามจัดการกับ UUID เพื่อหลีกเลี่ยงความผิดพลาด
+            # ไม่จำเป็นต้องส่ง p_record_id ในการบันทึกกิจกรรมนี้
             
             supabase_client.rpc('log_activity', log_params).execute()
         except Exception as log_err:
