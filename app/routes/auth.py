@@ -71,7 +71,8 @@ async def login(user: UserLogin, request: Request):
                     'p_action': 'login',
                     'p_description': 'เข้าสู่ระบบ',
                     'p_ip_address': request.client.host if request.client else None,
-                    'p_user_agent': request.headers.get("user-agent")
+                    'p_user_agent': request.headers.get("user-agent"),
+                    'p_record_id': None  # ส่ง None เพื่อให้เป็น NULL ในฐานข้อมูล
                 }
             ).execute()
         except Exception as log_err:
@@ -221,26 +222,18 @@ async def update_user_role(role_update: UserRoleUpdate, request: Request, user =
         
         # แก้ไขการส่ง record_id
         try:
-            # สร้างพารามิเตอร์สำหรับ log_activity โดยไม่รวม p_record_id
-            log_params = {
-                'p_user_id': admin_id,
-                'p_action': 'update_role',
-                'p_table_name': 'users',
-                'p_description': f'อัพเดทสิทธิ์ผู้ใช้ ID {role_update.user_id} เป็น {role_update.role}',
-                'p_ip_address': request.client.host if request.client else None,
-                'p_user_agent': request.headers.get("user-agent")
-            }
-            
-            # ทดลองเพิ่ม record_id ถ้ามีการตรวจสอบแล้วว่าเป็น UUID ที่ถูกต้อง
-            try:
-                if role_update.user_id and isinstance(role_update.user_id, str):
-                    uuid_obj = uuid.UUID(role_update.user_id)
-                    log_params['p_record_id'] = str(uuid_obj)
-            except (ValueError, TypeError):
-                # ถ้าแปลงไม่ได้ ไม่ต้องใส่ p_record_id
-                logger.warning(f"Invalid UUID format for user_id: {role_update.user_id}")
-            
-            supabase_client.rpc('log_activity', log_params).execute()
+            supabase_client.rpc(
+                'log_activity',
+                {
+                    'p_user_id': admin_id,
+                    'p_action': 'update_role',
+                    'p_table_name': 'users',
+                    'p_record_id': None,  # ส่ง None เพื่อให้เป็น NULL ในฐานข้อมูล
+                    'p_description': f'อัพเดทสิทธิ์ผู้ใช้ ID {role_update.user_id} เป็น {role_update.role}',
+                    'p_ip_address': request.client.host if request.client else None,
+                    'p_user_agent': request.headers.get("user-agent")
+                }
+            ).execute()
         except Exception as log_err:
             logger.error(f"Error logging role update activity: {str(log_err)}")
         
@@ -325,20 +318,18 @@ async def create_user(user_data: UserCreate, request: Request, current_user = De
         try:
             admin_id = current_user.get('id') if isinstance(current_user, dict) else current_user.id
             
-            # สร้างพารามิเตอร์โดยไม่รวม p_record_id
-            log_params = {
-                'p_user_id': admin_id,
-                'p_action': 'create_user',
-                'p_table_name': 'users',
-                'p_description': f'สร้างผู้ใช้ใหม่: {user_data.username}',
-                'p_ip_address': request.client.host if request.client else None,
-                'p_user_agent': request.headers.get("user-agent")
-            }
-            
-            # ลดโค้ดที่พยายามจัดการกับ UUID เพื่อหลีกเลี่ยงความผิดพลาด
-            # ไม่จำเป็นต้องส่ง p_record_id ในการบันทึกกิจกรรมนี้
-            
-            supabase_client.rpc('log_activity', log_params).execute()
+            supabase_client.rpc(
+                'log_activity',
+                {
+                    'p_user_id': admin_id,
+                    'p_action': 'create_user',
+                    'p_table_name': 'users',
+                    'p_record_id': None,  # ส่ง None เพื่อให้เป็น NULL ในฐานข้อมูล
+                    'p_description': f'สร้างผู้ใช้ใหม่: {user_data.username}',
+                    'p_ip_address': request.client.host if request.client else None,
+                    'p_user_agent': request.headers.get("user-agent")
+                }
+            ).execute()
         except Exception as log_err:
             logger.error(f"Error logging user creation activity: {str(log_err)}")
         
@@ -391,20 +382,18 @@ async def delete_user(user_data: UserDelete, request: Request, current_user = De
         
         # บันทึกกิจกรรม - แก้ไขการเรียกใช้ log_activity
         try:
-            # สร้างพารามิเตอร์โดยไม่รวม p_record_id
-            log_params = {
-                'p_user_id': admin_id,
-                'p_action': 'delete_user',
-                'p_table_name': 'users',
-                'p_description': f'ลบผู้ใช้: {username}',
-                'p_ip_address': request.client.host if request.client else None,
-                'p_user_agent': request.headers.get("user-agent")
-            }
-            
-            # ลดโค้ดที่พยายามจัดการกับ UUID เพื่อหลีกเลี่ยงความผิดพลาด
-            # ไม่จำเป็นต้องส่ง p_record_id ในการบันทึกกิจกรรมนี้
-            
-            supabase_client.rpc('log_activity', log_params).execute()
+            supabase_client.rpc(
+                'log_activity',
+                {
+                    'p_user_id': admin_id,
+                    'p_action': 'delete_user',
+                    'p_table_name': 'users',
+                    'p_record_id': None,  # ส่ง None เพื่อให้เป็น NULL ในฐานข้อมูล
+                    'p_description': f'ลบผู้ใช้: {username}',
+                    'p_ip_address': request.client.host if request.client else None,
+                    'p_user_agent': request.headers.get("user-agent")
+                }
+            ).execute()
         except Exception as log_err:
             logger.error(f"Error logging user deletion activity: {str(log_err)}")
         
