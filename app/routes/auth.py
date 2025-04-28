@@ -217,7 +217,6 @@ async def update_user_role(role_update: UserRoleUpdate, request: Request, user =
 
 @auth_router.post("/create-user")
 async def create_user(user_data: UserCreate, request: Request, current_user = Depends(require_admin)):
-    """สร้างผู้ใช้ใหม่ (สำหรับ admin เท่านั้น)"""
     try:
         # ตรวจสอบความถูกต้องของอีเมล
         if user_data.email:
@@ -237,13 +236,16 @@ async def create_user(user_data: UserCreate, request: Request, current_user = De
         if user_data.role not in ["admin", "member"]:
             raise HTTPException(status_code=400, detail="สิทธิ์ไม่ถูกต้อง (ต้องเป็น 'admin' หรือ 'member')")
         
+        # พิมพ์ข้อมูลเพื่อการดีบัก
+        logger.info(f"Creating user: {user_data}")
+        
         # สร้างผู้ใช้ใหม่โดยใช้ฟังก์ชัน register_user
         response = supabase_client.rpc(
             'register_user',
             {
                 'p_username': user_data.username,
                 'p_password': user_data.password,
-                'p_email': user_data.email,
+                'p_email': user_data.email or None,  # เปลี่ยนเป็น None ถ้าไม่มีค่า
                 'p_role': user_data.role
             }
         ).execute()
@@ -281,8 +283,6 @@ async def create_user(user_data: UserCreate, request: Request, current_user = De
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="ไม่พบข้อมูลผู้ใช้หลังจากลงทะเบียน"
             )
-        
-        # ลบการบันทึกกิจกรรม log_activity
         
         return {
             "id": user_id,
