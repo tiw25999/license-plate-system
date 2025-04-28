@@ -115,20 +115,7 @@ async def add_plate_route(
         # ดึงข้อมูลที่เพิ่งเพิ่มเพื่อรับ timestamp ที่ถูกต้อง
         result = await get_plate(plate_number)
         
-        # บันทึกกิจกรรม
-        if user_id:
-            supabase_client.rpc(
-                'log_activity',
-                {
-                    'p_user_id': user_id,
-                    'p_action': 'add_plate',
-                    'p_table_name': 'plates',
-                    'p_record_id': result.get('id') if result else None,
-                    'p_description': f'เพิ่มทะเบียน {plate_number} จังหวัด {province}',
-                    'p_ip_address': request.client.host if request.client else None,
-                    'p_user_agent': request.headers.get("user-agent")
-                }
-            ).execute()
+        # ลบการบันทึกกิจกรรม
         
         if result:
             return {
@@ -182,20 +169,7 @@ async def delete_watchlist(
         if hasattr(response, 'error') and response.error:
             raise HTTPException(status_code=500, detail=f"Error deleting watchlist: {response.error}")
         
-        # บันทึกกิจกรรม
-        if user_id:
-            supabase_client.rpc(
-                'log_activity',
-                {
-                    'p_user_id': user_id,
-                    'p_action': 'delete_watchlist',
-                    'p_table_name': 'watchlists',
-                    'p_record_id': watchlist_id,
-                    'p_description': f'ลบทะเบียน {watchlist_data.data.get("plate")} จังหวัด {watchlist_data.data.get("province")} จากรายการติดตาม',
-                    'p_ip_address': request.client.host if request.client else None,
-                    'p_user_agent': request.headers.get("user-agent")
-                }
-            ).execute()
+        # ลบการบันทึกกิจกรรม
         
         return {"message": "ลบรายการติดตามสำเร็จ"}
     except HTTPException:
@@ -253,20 +227,7 @@ async def update_alert(
         if hasattr(response, 'error') and response.error:
             raise HTTPException(status_code=500, detail=f"Error updating alert: {response.error}")
         
-        # บันทึกกิจกรรม
-        if user_id:
-            supabase_client.rpc(
-                'log_activity',
-                {
-                    'p_user_id': user_id,
-                    'p_action': 'update_alert',
-                    'p_table_name': 'alerts',
-                    'p_record_id': alert_id,
-                    'p_description': f'อัปเดตสถานะการแจ้งเตือนเป็น {status}',
-                    'p_ip_address': request.client.host if request.client else None,
-                    'p_user_agent': request.headers.get("user-agent")
-                }
-            ).execute()
+        # ลบการบันทึกกิจกรรม
         
         return {"message": "อัปเดตสถานะการแจ้งเตือนสำเร็จ", "data": response.data[0] if response.data else None}
     except HTTPException:

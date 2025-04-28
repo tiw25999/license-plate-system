@@ -49,22 +49,8 @@ async def require_auth(request: Request):
             detail="กรุณาเข้าสู่ระบบก่อนใช้งาน"
         )
     
-    # บันทึกกิจกรรม
-    if hasattr(request.state, "user"):
-        try:
-            # บันทึกกิจกรรมการใช้งาน API
-            supabase_client.rpc(
-                'log_activity',
-                {
-                    'p_user_id': user.get('id'),
-                    'p_action': f"API_{request.method}",
-                    'p_description': f"API Request: {request.url.path}",
-                    'p_ip_address': request.client.host if request.client else None,
-                    'p_user_agent': request.headers.get("user-agent")
-                }
-            ).execute()
-        except Exception as e:
-            logger.error(f"Error logging activity: {str(e)}")
+    # ลบการบันทึกกิจกรรม
+    # เดิมมีการบันทึกกิจกรรมตรงนี้ แต่ได้ลบออกเพื่อหลีกเลี่ยงปัญหา UUID
     
     return user
 
