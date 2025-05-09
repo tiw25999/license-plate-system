@@ -1,7 +1,6 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from app.routes.plates import plates_router
-from app.routes.auth import auth_router  # เพิ่มบรรทัดนี้
 import uvicorn
 from dotenv import load_dotenv
 import logging
@@ -69,7 +68,6 @@ async def startup_event():
 
 # Mount the routers
 app.include_router(plates_router, prefix="/plates", tags=["plates"])
-app.include_router(auth_router, prefix="/auth", tags=["auth"])  # เพิ่มบรรทัดนี้
 
 @app.get("/")
 def read_root():
