@@ -7,8 +7,9 @@ import asyncio
 from cachetools import TTLCache
 import logging
 import time
-import re
 from fastapi import Request
+from typing import Optional
+
 
 # ตั้งค่า logging
 logging.basicConfig(level=logging.INFO)
@@ -18,26 +19,21 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 # สร้าง cache
-plates_cache = TTLCache(maxsize=1000, ttl=300)  # cache เก็บข้อมูลทะเบียน 5 นาที
-search_cache = TTLCache(maxsize=100, ttl=60)  # cache สำหรับการค้นหา 1 นาที
-all_plates_cache = TTLCache(maxsize=1, ttl=300)  # cache เก็บข้อมูลทั้งหมด 5 นาที
-camera_cache = TTLCache(maxsize=1, ttl=600)  # cache เก็บข้อมูลกล้อง 10 นาที
-watchlist_cache = TTLCache(maxsize=1, ttl=300)  # cache เก็บข้อมูลรายการติดตาม 5 นาที
-alerts_cache = TTLCache(maxsize=1, ttl=60)  # cache เก็บข้อมูลการแจ้งเตือน 1 นาที
+plates_cache = TTLCache(maxsize=1000, ttl=300)
+search_cache = TTLCache(maxsize=100, ttl=60)
+all_plates_cache = TTLCache(maxsize=1, ttl=300)
+camera_cache = TTLCache(maxsize=1, ttl=600)
+watchlist_cache = TTLCache(maxsize=1, ttl=300)
+alerts_cache = TTLCache(maxsize=1, ttl=60)
 
-# ตัวแปรสำหรับบันทึกเวลาใช้งาน
 last_db_access = 0
-min_db_access_interval = 0.1  # ขั้นต่ำ 100ms ระหว่างการเรียก
-
-# จำนวนรายการที่ดึงจาก DB มากสุด (ลดลงเหลือ 1000 รายการ)
+min_db_access_interval = 0.1
 MAX_RECORDS = 1000
 
-# แปลงวันที่ไทยเป็น datetime object พร้อม timezone
+
 def parse_thai_date(date_str):
-    """แปลงวันที่รูปแบบไทย (DD/MM/YYYY) เป็น datetime object พร้อม timezone"""
     try:
         day, month, year = date_str.split('/')
-        # สร้าง datetime object พร้อม timezone
         thailand_tz = pytz.timezone('Asia/Bangkok')
         dt = datetime(int(year), int(month), int(day), tzinfo=thailand_tz)
         return dt
@@ -45,83 +41,83 @@ def parse_thai_date(date_str):
         logger.error(f"Error parsing date: {date_str}, {e}")
         return None
 
-# เพิ่มฟังก์ชันใหม่สำหรับแปลง timestamp เป็นรูปแบบไทย
+
 def format_timestamp_thai(timestamp):
-    """แปลง timestamp เป็นรูปแบบไทย DD/MM/YYYY HH:MM:SS"""
     if not timestamp:
         return "-"
-    
-    # ถ้าเป็น string ให้แปลงเป็น datetime ก่อน
     if isinstance(timestamp, str):
         try:
             timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
         except Exception as e:
             logger.error(f"Error converting timestamp string: {e}")
             return timestamp
-    
-    # แปลงเป็น timezone ไทย
     thailand_tz = pytz.timezone('Asia/Bangkok')
     local_dt = timestamp.astimezone(thailand_tz)
-    
-    # แปลงเป็นรูปแบบสตริง DD/MM/YYYY HH:MM:SS
     return local_dt.strftime("%d/%m/%Y %H:%M:%S")
 
-async def add_plate(plate_number, province=None, id_camera=None, camera_name=None, user_id=None, timestamp=None):
-    """เพิ่มทะเบียนไปที่ฐานข้อมูลด้วย async"""
+
+async def add_plate(plate_number, province=None, id_camera=None, camera_name=None,
+                   user_id=None, timestamp=None,
+                   character_confidences=None, province_confidence=None):
     global last_db_access
-    
-    # สร้าง timestamp ในรูปแบบที่ถูกต้อง
     thailand_tz = pytz.timezone('Asia/Bangkok')
     now = datetime.now(thailand_tz)
-    
+
     try:
-        # ป้องกันการเรียกฐานข้อมูลถี่เกินไป
         current_time = time.time()
         if current_time - last_db_access < min_db_access_interval:
             await asyncio.sleep(min_db_access_interval)
-        
-        # เก็บเป็น timestamp (จะแปลงเป็นรูปแบบไทยตอนแสดงผล)
+
         data = {
             "plate": plate_number,
-            "timestamp": now.isoformat()  # เก็บเป็นรูปแบบ ISO
+            "timestamp": now.isoformat(),
         }
-        
-        # เพิ่มข้อมูล user_id ถ้ามี
         if user_id:
             data["user_id"] = user_id
-            
-        # เพิ่มข้อมูลจังหวัดและกล้องถ้ามี
         if province:
             data["province"] = province
         if id_camera:
             data["id_camera"] = id_camera
         if camera_name:
             data["camera_name"] = camera_name
-        
-        # ดำเนินการแบบ non-blocking
+
         loop = asyncio.get_event_loop()
         response = await loop.run_in_executor(
-            None, 
+            None,
             lambda: supabase_client.table("plates").insert(data).execute()
         )
-        
-        # บันทึกเวลาการเข้าถึงฐานข้อมูลล่าสุด
+
         last_db_access = time.time()
-        
+
         if hasattr(response, 'error') and response.error:
             logger.error(f"Database Error: {response.error}")
             raise Exception(f"Database Error: {response.error}")
-        
-        # ล้าง cache เพื่อให้ข้อมูลเป็นปัจจุบัน
+
+        plate_id = response.data[0]["id"]
+
+        # แยกตัวอักษรและเพิ่มข้อมูลเข้า plate_characters
+        if plate_number and character_confidences:
+            char_data = []
+            for idx, char in enumerate(plate_number):
+                char_data.append({
+                    "plate_id": plate_id,
+                    "character": char,
+                    "character_confidence": character_confidences[idx] if idx < len(character_confidences) else None,
+                    "province": province,
+                    "province_confidence": province_confidence,
+                })
+            for entry in char_data:
+                await loop.run_in_executor(
+                    None,
+                    lambda e=entry: supabase_client.table("plate_characters").insert(e).execute()
+                )
+
         if plate_number in plates_cache:
             del plates_cache[plate_number]
         search_cache.clear()
         all_plates_cache.clear()
-        alerts_cache.clear()  # ล้าง cache การแจ้งเตือนด้วยเพราะอาจมีการแจ้งเตือนใหม่
-        
-        # ไม่ต้องทำเพิ่มเติม เพราะ trigger ทำงานในฐานข้อมูลอยู่แล้ว
-        # trigger_create_alert_from_plate จะทำงานอัตโนมัติ
-        
+        alerts_cache.clear()
+
         logger.info(f"Added plate to database: {plate_number}")
         return True
     except Exception as e:
@@ -662,3 +658,152 @@ async def clear_caches():
     except Exception as e:
         logger.error(f"Clear Caches Exception: {e}")
         return False
+    
+async def add_plate_candidate(plate_number, province=None, id_camera=None, camera_name=None,
+                              user_id=None, timestamp=None,
+                              character_confidences=None, province_confidence=None):
+    global last_db_access
+    thailand_tz = pytz.timezone('Asia/Bangkok')
+    now = datetime.now(thailand_tz)
+
+    try:
+        current_time = time.time()
+        if current_time - last_db_access < min_db_access_interval:
+            await asyncio.sleep(min_db_access_interval)
+
+        data = {
+            "plate": plate_number,
+            "created_at": now.isoformat()
+        }
+        if user_id:
+            data["uploaded_by"] = user_id
+        if province:
+            data["province"] = province
+        if id_camera:
+            data["id_camera"] = id_camera
+        if camera_name:
+            data["camera_name"] = camera_name
+
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: supabase_client.table("plate_candidates").insert(data).execute()
+        )
+
+        last_db_access = time.time()
+
+        if hasattr(response, 'error') and response.error:
+            logger.error(f"Database Error: {response.error}")
+            raise Exception(f"Database Error: {response.error}")
+
+        return response.data[0]
+    except Exception as e:
+        logger.error(f"Database Exception: {e}")
+        raise
+
+async def verify_plate_candidate(candidate_id: str, verified_by_user_id: Optional[str] = None):
+    """
+    ยืนยันป้ายจาก plate_candidates และย้ายไปยัง plates
+    """
+    from app.config import supabase_client
+    from datetime import datetime
+
+    try:
+        # 1. ดึงข้อมูลจาก plate_candidates
+        candidate_res = supabase_client.table("plate_candidates").select("*").eq("id", candidate_id).single().execute()
+        if not candidate_res.data:
+            raise Exception("ไม่พบข้อมูลใน plate_candidates")
+
+        candidate = candidate_res.data
+
+        # 2. ย้ายข้อมูลไปยัง plates
+        new_plate = {
+            "plate": candidate["plate"],
+            "province": candidate.get("province"),
+            "id_camera": candidate.get("id_camera"),
+            "camera_name": candidate.get("camera_name"),
+            "user_id": verified_by_user_id,
+            "image_id": candidate.get("image_id"),
+            "is_verified": True,
+            "timestamp": datetime.now().isoformat()
+        }
+
+        insert_res = supabase_client.table("plates").insert(new_plate).execute()
+        if hasattr(insert_res, "error") and insert_res.error:
+            raise Exception(f"Insert failed: {insert_res.error}")
+
+        plate_id = insert_res.data[0]["id"]
+
+        # 3. อัปเดต plate_images.plate_id ถ้ามี
+        if candidate.get("image_id"):
+            image_update_res = supabase_client.table("plate_images").update({
+                "plate_id": plate_id,
+                "is_verified": True
+            }).eq("id", candidate["image_id"]).execute()
+            if hasattr(image_update_res, "error") and image_update_res.error:
+                raise Exception(f"Update image failed: {image_update_res.error}")
+
+        # 4. ลบออกจาก plate_candidates
+        delete_res = supabase_client.table("plate_candidates").delete().eq("id", candidate_id).execute()
+        if hasattr(delete_res, "error") and delete_res.error:
+            raise Exception(f"Delete candidate failed: {delete_res.error}")
+
+        return plate_id
+    except Exception as e:
+        raise Exception(f"Verify failed: {e}")
+
+
+async def get_plate_candidates():
+    """ดึงข้อมูล plate_candidates ทั้งหมด (ล่าสุด 100 รายการ)"""
+    global last_db_access
+
+    try:
+        current_time = time.time()
+        if current_time - last_db_access < min_db_access_interval:
+            await asyncio.sleep(min_db_access_interval)
+
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: supabase_client.table("plate_candidates")
+                    .select("*")
+                    .order("created_at", desc=True)
+                    .limit(100)
+                    .execute()
+        )
+
+        last_db_access = time.time()
+
+        # ✅ ตรวจสอบว่า response.data มีข้อมูลหรือไม่
+        if response.data:
+            logger.info(f"Retrieved plate candidates: {len(response.data)} records")
+            return response.data
+        else:
+            logger.warning("No plate candidates found")
+            return []
+    except Exception as e:
+        logger.error(f"Get Plate Candidates Exception: {e}")
+        return []
+
+
+
+async def edit_plate(plate_id: str, new_plate: str, edited_by: Optional[str] = None, reason: Optional[str] = None):
+    old_res = supabase_client.table("plates").select("*").eq("id", plate_id).single().execute()
+    if not old_res.data:
+        raise Exception("ไม่พบป้ายที่ต้องการแก้ไข")
+
+    old_plate = old_res.data["plate"]
+    if old_plate == new_plate:
+        return {"message": "ไม่มีการเปลี่ยนแปลง"}
+
+    supabase_client.table("plates").update({"plate": new_plate}).eq("id", plate_id).execute()
+
+    supabase_client.table("plate_edits").insert({
+        "plate_id": plate_id,
+        "old_plate": old_plate,
+        "new_plate": new_plate,
+        "edited_by": edited_by,
+        "reason": reason
+    }).execute()
+
+    return {"message": "แก้ไขสำเร็จ", "old": old_plate, "new": new_plate}

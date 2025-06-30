@@ -15,13 +15,27 @@ class PlateCreate(PlateBase):
 class PlateModel(PlateBase):
     timestamp: str
 
+class CharacterConfidenceItem(BaseModel):
+    char: str = Field(..., description="ตัวอักษรในป้ายทะเบียน")
+    confidence: float = Field(..., ge=0, le=100, description="ค่าความแม่นยำ (0-100)")
+
+class PlateAddDetailedRequest(BaseModel):
+    plate_number: str
+    province: Optional[str] = Field(default=None)
+    province_confidence: Optional[float] = Field(default=None)
+    character_confidences: Optional[List[CharacterConfidenceItem]] = Field(default=None)
+    id_camera: Optional[str] = Field(default=None)
+    camera_name: Optional[str] = Field(default=None)
+
 class PlateResponse(BaseModel):
-    status: str
+    status: Optional[str] = None
     plate_number: str
     timestamp: str
     province: Optional[str] = None
     id_camera: Optional[str] = None
     camera_name: Optional[str] = None
+    character_confidences: Optional[List[CharacterConfidenceItem]] = None
+    province_confidence: Optional[float] = None
 
 # Models สำหรับการค้นหา
 class SearchParams(BaseModel):

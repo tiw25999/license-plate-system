@@ -1,20 +1,44 @@
-from fastapi import APIRouter, Query, HTTPException, Path, Request
+from fastapi import APIRouter, Query, HTTPException, Path, Request, Depends
 from app.schemas import PlateModel, PlateResponse, SearchParams
-from app.database import add_plate, get_plate, get_plates, search_plates, get_cameras, get_watchlists, get_alerts, clear_caches
+from app.database import (
+    get_plate_candidates, edit_plate, add_plate_candidate, verify_plate_candidate,
+    get_plate, get_plates, search_plates, get_cameras, get_watchlists, get_alerts, clear_caches
+)
+from app.routes.auth import get_current_user
+from app.routes.auth_extra import is_admin
+from app.utils.log_utils import log_activity
 from app.config import supabase_client
 from datetime import datetime
-import pytz
 from typing import Optional, List
 import logging
-import re
 
-# ตั้งค่า logging
 logger = logging.getLogger(__name__)
-
 plates_router = APIRouter()
 
+@plates_router.post("/verify_plate/{candidate_id}")
+async def verify_plate_candidate_route(candidate_id: str, user: dict = Depends(get_current_user)):
+    try:
+        plate_id = await verify_plate_candidate(candidate_id, verified_by_user_id=user["user_id"])
+        await log_activity(user["user_id"], "verify_plate", f"Verified candidate {candidate_id} to plate {plate_id}")
+        return {"message": "Verified successfully", "plate_id": plate_id}
+    except Exception as e:
+        logger.error(f"Error verifying plate candidate: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@plates_router.delete("/candidates/{candidate_id}")
+async def reject_plate_candidate_route(candidate_id: str, user: dict = Depends(get_current_user)):
+    try:
+        response = supabase_client.table("plate_candidates").delete().eq("id", candidate_id).execute()
+        if hasattr(response, "error") and response.error:
+            raise HTTPException(status_code=500, detail=f"Delete failed: {response.error}")
+        await log_activity(user["user_id"], "reject_plate", f"Rejected plate candidate {candidate_id}")
+        return {"message": "Rejected successfully"}
+    except Exception as e:
+        logger.error(f"Reject candidate error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @plates_router.get("/get_plates")
-async def get_plates_route(request: Request = None):
+async def get_plates_route():
     try:
         plates = await get_plates()
         return plates
@@ -61,7 +85,7 @@ async def search_plates_route(
         raise HTTPException(status_code=500, detail=str(e))
 
 @plates_router.get("/get_cameras")
-async def get_cameras_route(request: Request = None):
+async def get_cameras_route():
     try:
         cameras = await get_cameras()
         return cameras
@@ -70,7 +94,7 @@ async def get_cameras_route(request: Request = None):
         raise HTTPException(status_code=500, detail=str(e))
 
 @plates_router.get("/get_watchlists")
-async def get_watchlists_route(request: Request = None):
+async def get_watchlists_route():
     try:
         watchlists = await get_watchlists(user_id=None, is_admin=False)
         return watchlists
@@ -84,29 +108,35 @@ async def add_plate_route(
     province: Optional[str] = None,
     id_camera: Optional[str] = None,
     camera_name: Optional[str] = None,
-    request: Request = None
+    character_confidences: Optional[List[float]] = None,
+    province_confidence: Optional[float] = None
 ):
     try:
-        await add_plate(plate_number, province, id_camera, camera_name, user_id=None)
-        result = await get_plate(plate_number)
-        if result:
-            return {
-                "status": "success",
-                "plate_number": plate_number,
-                "timestamp": result["timestamp"],
-                "province": result.get("province"),
-                "id_camera": result.get("id_camera"),
-                "camera_name": result.get("camera_name")
-            }
-        else:
-            return {
-                "status": "success",
-                "plate_number": plate_number,
-                "timestamp": datetime.now(pytz.timezone('Asia/Bangkok')).strftime("%d/%m/%Y %H:%M:%S"),
-                "province": province,
-                "id_camera": id_camera,
-                "camera_name": camera_name
-            }
+        if character_confidences and len(character_confidences) != len(plate_number):
+            raise HTTPException(
+                status_code=400,
+                detail="จำนวน character_confidences ไม่ตรงกับจำนวนตัวอักษรใน plate_number"
+            )
+
+        result = await add_plate_candidate(
+            plate_number=plate_number,
+            province=province,
+            id_camera=id_camera,
+            camera_name=camera_name,
+            user_id=None,
+            character_confidences=character_confidences,
+            province_confidence=province_confidence
+        )
+
+        return {
+            "status": "candidate_submitted",
+            "plate_number": plate_number,
+            "timestamp": result.get("created_at"),
+            "province": province,
+            "id_camera": id_camera,
+            "camera_name": camera_name
+        }
+
     except Exception as e:
         logger.error(f"Error adding plate: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -141,8 +171,7 @@ async def get_alerts_route(request: Request, status: Optional[str] = None):
 async def update_alert(
     alert_id: str,
     status: str,
-    notes: Optional[str] = None,
-    request: Request = None
+    notes: Optional[str] = None
 ):
     try:
         if status not in ["new", "viewed", "handled", "ignored"]:
@@ -163,4 +192,48 @@ async def update_alert(
         raise
     except Exception as e:
         logger.error(f"Error updating alert: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@plates_router.get("/candidates")
+async def list_candidates_route(current_user=Depends(is_admin)):
+    return await get_plate_candidates()
+
+@plates_router.put("/edit_plate/{plate_id}")
+async def edit_plate_route(
+    plate_id: str,
+    new_plate: str,
+    reason: Optional[str] = None,
+    request: Request = None,
+    current_user=Depends(is_admin)
+):
+    result = await edit_plate(plate_id, new_plate, edited_by=current_user["user_id"], reason=reason)
+    await log_activity(
+        user_id=current_user["user_id"],
+        action="edit_plate",
+        description=f"Edited plate {plate_id} -> {new_plate}. Reason: {reason}",
+        ip=request.client.host,
+        user_agent=request.headers.get("user-agent")
+    )
+    return result
+
+@plates_router.get("/plate/history/{plate_id}")
+async def get_plate_history_route(plate_id: str, current_user=Depends(get_current_user)):
+    try:
+        response = supabase_client.table("plate_edits").select("*").eq("plate_id", plate_id).order("edited_at", desc=True).execute()
+        if hasattr(response, 'error') and response.error:
+            raise HTTPException(status_code=500, detail=response.error)
+        return response.data or []
+    except Exception as e:
+        logger.error(f"Error getting plate history: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@plates_router.get("/logs/activity")
+async def get_activity_logs(current_user=Depends(is_admin)):
+    try:
+        response = supabase_client.table("activity_logs").select("*").order("created_at", desc=True).limit(100).execute()
+        if hasattr(response, 'error') and response.error:
+            raise HTTPException(status_code=500, detail=response.error)
+        return response.data or []
+    except Exception as e:
+        logger.error(f"Error getting logs: {e}")
         raise HTTPException(status_code=500, detail=str(e))

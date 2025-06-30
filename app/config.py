@@ -1,6 +1,7 @@
 import os
 import sys
 from dotenv import load_dotenv
+import httpx
 
 # พิมพ์ข้อมูลเพื่อดีบัก
 print("Starting config.py initialization")
@@ -12,6 +13,7 @@ load_dotenv()
 
 # พิมพ์รายการตัวแปรทั้งหมดในสภาพแวดล้อม
 print("All environment variables:", list(os.environ.keys()))
+httpx._client.DEFAULT_TIMEOUT_CONFIG = httpx.Timeout(20.0, connect=10.0)
 
 # ตรวจสอบว่าใช้การเชื่อมต่อแบบ Supabase หรือ PostgreSQL โดยตรง
 DB_CONNECTION_TYPE = os.environ.get("DB_CONNECTION_TYPE", "supabase")

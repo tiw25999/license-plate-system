@@ -1,2 +1,2 @@
 Back-end for license plate recognition
-test api
+Use python=3.10
