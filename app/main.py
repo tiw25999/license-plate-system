@@ -1,34 +1,35 @@
+# app/main.py
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from app.routes.plates import plates_router
 from app.routes.auth import auth_router
 import uvicorn
-from dotenv import load_dotenv
 import logging
 import time
-from starlette.concurrency import run_in_threadpool
-
+from dotenv import load_dotenv
 from slowapi.extension import Limiter
-from slowapi.errors import RateLimitExceeded
-from slowapi.util import get_remote_address
 from slowapi.middleware import SlowAPIMiddleware
+from slowapi.util import get_remote_address
 
 # ตั้งค่า logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    format="%(asctime)s - %(levelname)s - %(message)s",
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("license-plate-api")
 
+# โหลด .env
 load_dotenv()
 
 app = FastAPI(title="License Plate API")
 
+# ตั้ง rate limiter
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_middleware(SlowAPIMiddleware)
 
-# ✅ CORS middleware
+# ตั้ง CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -36,49 +37,40 @@ app.add_middleware(
         "http://localhost:3000"
     ],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_methods=["*"],
     allow_headers=["*"],
-    max_age=86400,
 )
 
-# ✅ Middleware สำหรับวัดเวลา
+# Middleware วัดเวลาแต่ละ request
 @app.middleware("http")
 async def add_process_time_header(request: Request, call_next):
-    start_time = time.time()
+    start = time.time()
     response = await call_next(request)
-    process_time = time.time() - start_time
-    response.headers["X-Process-Time"] = str(process_time)
-    logger.info(
-        f"Path: {request.url.path} | "
-        f"Method: {request.method} | "
-        f"Time: {process_time:.4f}s"
-    )
+    elapsed = time.time() - start
+    response.headers["X-Process-Time"] = str(elapsed)
+    logger.info(f"Path: {request.url.path} | Method: {request.method} | Time: {elapsed:.4f}s")
     return response
 
-# ✅ Health check
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
 
-# ✅ Startup event
 @app.on_event("startup")
 async def startup_event():
+    from app.database import get_plates
     try:
-        from app.database import get_plates
         plates = await get_plates()
-        logger.info(f"Supabase connection test: Successfully connected. Count: {len(plates)}")
+        logger.info(f"เชื่อมต่อ Supabase สำเร็จ จำนวน plate ทั้งหมด: {len(plates)}")
     except Exception as e:
-        logger.error(f"Supabase connection test failed: {e}")
-        pass
+        logger.error(f"เชื่อมต่อ Supabase ล้มเหลว: {e}")
 
-# ✅ Mount routers
-app.include_router(plates_router, prefix="/plates", tags=["plates"])
-app.include_router(auth_router, prefix="", tags=["auth"])
+# เพิ่ม router ทั้งสองตัว
+app.include_router(plates_router)  # prefix="/plates"
+app.include_router(auth_router)    # prefix="/auth"
 
-# ✅ Root
 @app.get("/")
 def read_root():
-    return {"message": "License Plate API is running"}
+    return {"message": "License Plate API กำลังทำงาน"}
 
 if __name__ == "__main__":
     uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)

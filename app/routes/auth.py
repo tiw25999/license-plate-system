@@ -1,37 +1,46 @@
+# app/routes/auth.py
+
 from fastapi import APIRouter, HTTPException, Depends, Request
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
-from datetime import datetime, timedelta, timezone
-from app.utils.log_utils import log_activity
+from datetime import datetime, timedelta
+from jose import jwt, JWTError
+from passlib.hash import bcrypt
 from slowapi.extension import Limiter
 from slowapi.util import get_remote_address
-from jose import jwt, JWTError
-import os
-from passlib.hash import bcrypt
 from dotenv import load_dotenv
-from app.config import supabase_client
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+import os
 
-# --- Init ---
-limiter = Limiter(key_func=get_remote_address)
-security = HTTPBearer()
+from app.config import supabase_client
+from app.utils.log_utils import log_activity
+
+# โหลดตัวแปรแวดล้อมจาก .env
 load_dotenv()
 
+# คอนสแตนต์สำหรับ JWT
 SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key")
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60
-REFRESH_TOKEN_EXPIRE_DAYS = 7
+ACCESS_TOKEN_EXPIRE_MINUTES = 60       # อายุ token (นาที)
+REFRESH_TOKEN_EXPIRE_DAYS = 7          # อายุ refresh token (วัน)
 
-auth_router = APIRouter()
+# ตั้ง rate limiter และ HTTP Bearer
+limiter = Limiter(key_func=get_remote_address)
+security = HTTPBearer()
 
-# --- Schemas ---
-class LoginRequest(BaseModel):
-    username: str
-    password: str
+# สร้าง router พร้อม prefix /auth
+auth_router = APIRouter(prefix="/auth", tags=["auth"])
+
+
+# ——— Schemas ———
 
 class SignupRequest(BaseModel):
     username: str
     password: str
     email: str = None
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
 
 class TokenResponse(BaseModel):
     token: str
@@ -40,66 +49,76 @@ class TokenResponse(BaseModel):
     username: str
     role: str
 
-class ChangePasswordRequest(BaseModel):
-    old_password: str
-    new_password: str
-
 class RefreshTokenRequest(BaseModel):
     refresh_token: str
 
 class LogoutRequest(BaseModel):
     refresh_token: str
 
-# --- JWT utils ---
+class ChangePasswordRequest(BaseModel):
+    old_password: str
+    new_password: str
+
+
+# ——— ฟังก์ชันช่วยสร้างและตรวจสอบ JWT ———
+
 def create_token(data: dict, expires_delta: timedelta = None):
+    """
+    สร้าง JWT token จากข้อมูล data และกำหนดวันหมดอายุ
+    """
     expire = datetime.utcnow() + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
-    to_encode = {
-        "sub": data["user_id"],
-        "username": data["username"],
-        "role": data["role"],
-        "exp": expire
-    }
-    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    payload = {**data, "exp": expire}
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
 def verify_token(token: str):
+    """
+    ตรวจสอบ JWT token และ decode คืน payload หรือโยน HTTPException
+    """
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        return payload
+        return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
     except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token expired")
+        raise HTTPException(status_code=401, detail="Token หมดอายุ")
     except JWTError:
-        raise HTTPException(status_code=401, detail="Invalid token")
-    except Exception:
-        raise HTTPException(status_code=401, detail="Token decode error")
+        raise HTTPException(status_code=401, detail="Token ไม่ถูกต้อง")
 
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    token = credentials.credentials
-    data = verify_token(token)
+    """
+    ดึงข้อมูลผู้ใช้จาก token ใน header Authorization
+    """
+    payload = verify_token(credentials.credentials)
     return {
-        "user_id": data.get("user_id") or data.get("sub"),
-        "username": data.get("username"),
-        "role": data.get("role", "member")
+        "user_id": payload.get("user_id"),
+        "username": payload.get("username"),
+        "role": payload.get("role", "member")
     }
 
-# --- Routes ---
-@auth_router.post("/auth/signup", response_model=TokenResponse)
-async def signup(payload: SignupRequest, request: Request):
-    existing = supabase_client.table("users").select("*").eq("username", payload.username).execute()
-    if existing.data:
-        raise HTTPException(status_code=400, detail="Username already exists")
 
-    hashed = bcrypt.hash(payload.password)
-    response = supabase_client.table("users").insert({
+# ——— เส้นทาง /auth ———
+
+@auth_router.post("/signup", response_model=TokenResponse)
+async def signup(payload: SignupRequest, request: Request):
+    """
+    สมัครสมาชิก → คืน token, refresh_token, user_id, username, role
+    """
+    # ตรวจว่ามี username ซ้ำหรือไม่
+    existing = supabase_client.table("users") \
+        .select("*").eq("username", payload.username).execute()
+    if existing.data:
+        raise HTTPException(status_code=400, detail="ชื่อผู้ใช้ซ้ำ")
+
+    # เข้ารหัสรหัสผ่าน
+    hashed_pw = bcrypt.hash(payload.password)
+    resp = supabase_client.table("users").insert({
         "username": payload.username,
-        "password": hashed,
+        "password": hashed_pw,
         "email": payload.email,
         "role": "member"
     }).execute()
+    if resp.error:
+        raise HTTPException(status_code=500, detail="สมัครสมาชิกไม่สำเร็จ")
 
-    if hasattr(response, "error") and response.error:
-        raise HTTPException(status_code=500, detail="Signup failed")
-
-    user = response.data[0]
+    user = resp.data[0]
+    # สร้าง token และ refresh token
     token = create_token({
         "user_id": user["id"],
         "username": user["username"],
@@ -109,6 +128,57 @@ async def signup(payload: SignupRequest, request: Request):
         "user_id": user["id"],
         "username": user["username"],
         "role": user["role"]
+    }, expires_delta=timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS))
+
+    # เก็บ refresh token ในตาราง user_sessions
+    supabase_client.table("user_sessions").insert({
+        "user_id": user["id"],
+        "refresh_token": refresh_token,
+        "ip_address": request.client.host,
+        "user_agent": request.headers.get("user-agent"),
+        "expires_at": (datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)).isoformat()
+    }).execute()
+
+    # บันทึก activity log
+    await log_activity(
+        user_id=user["id"],
+        action="signup",
+        description=f"สมัครสมาชิก: {user['username']}",
+        ip=request.client.host,
+        user_agent=request.headers.get("user-agent")
+    )
+
+    return {
+        "token": token,
+        "refresh_token": refresh_token,
+        "user_id": user["id"],
+        "username": user["username"],
+        "role": user["role"]
+    }
+
+
+@auth_router.post("/login", response_model=TokenResponse)
+@limiter.limit("15/minute")
+async def login(payload: LoginRequest, request: Request):
+    """
+    เข้าสู่ระบบ → คืน token, refresh_token, user_id, username, role
+    """
+    user_res = supabase_client.table("users") \
+        .select("*").eq("username", payload.username).single().execute()
+    if not user_res.data or not bcrypt.verify(payload.password, user_res.data["password"]):
+        raise HTTPException(status_code=401, detail="ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง")
+
+    user = user_res.data
+    role = user.get("role", "member")
+    token = create_token({
+        "user_id": user["id"],
+        "username": user["username"],
+        "role": role
+    })
+    refresh_token = create_token({
+        "user_id": user["id"],
+        "username": user["username"],
+        "role": role
     }, expires_delta=timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS))
 
     supabase_client.table("user_sessions").insert({
@@ -121,8 +191,8 @@ async def signup(payload: SignupRequest, request: Request):
 
     await log_activity(
         user_id=user["id"],
-        action="signup",
-        description=f"User signed up: {user['username']}",
+        action="login",
+        description=f"เข้าสู่ระบบ: {user['username']}",
         ip=request.client.host,
         user_agent=request.headers.get("user-agent")
     )
@@ -132,168 +202,33 @@ async def signup(payload: SignupRequest, request: Request):
         "refresh_token": refresh_token,
         "user_id": user["id"],
         "username": user["username"],
-        "role": user["role"]
-    }
-
-@auth_router.post("/auth/login", response_model=TokenResponse)
-@limiter.limit("15/minute")
-async def login(payload: LoginRequest, request: Request):
-    user = supabase_client.table("users").select("*").eq("username", payload.username).single().execute()
-
-    if not user.data or not bcrypt.verify(payload.password, user.data["password"]):
-        raise HTTPException(status_code=401, detail="Invalid username or password")
-
-    role = user.data.get("role", "member")
-
-    token = create_token({
-        "user_id": user.data["id"],
-        "username": user.data["username"],
-        "role": role
-    })
-
-    refresh_token = create_token({
-        "user_id": user.data["id"],
-        "username": user.data["username"],
-        "role": role
-    }, expires_delta=timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS))
-
-    supabase_client.table("user_sessions").insert({
-        "user_id": user.data["id"],
-        "refresh_token": refresh_token,
-        "ip_address": request.client.host,
-        "user_agent": request.headers.get("user-agent"),
-        "expires_at": (datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)).isoformat()
-    }).execute()
-
-    await log_activity(
-        user_id=user.data["id"],
-        action="login",
-        description=f"User logged in: {user.data['username']}",
-        ip=request.client.host,
-        user_agent=request.headers.get("user-agent")
-    )
-
-    return {
-        "token": token,
-        "refresh_token": refresh_token,
-        "user_id": user.data["id"],
-        "username": user.data["username"],
         "role": role
     }
 
-@auth_router.get("/auth/verify")
-async def verify(token: str):
-    data = verify_token(token)
-    return {"valid": True, "user": data}
 
-@auth_router.post("/auth/logout")
-async def logout(payload: LogoutRequest, request: Request):
-    token = payload.refresh_token
-    session_res = supabase_client.table("user_sessions").select("*").eq("refresh_token", token).single().execute()
-
-    if not session_res.data:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    supabase_client.table("user_sessions").delete().eq("id", session_res.data["id"]).execute()
-
-    await log_activity(
-        user_id=session_res.data["user_id"],
-        action="logout",
-        description="User logged out from session",
-        ip=request.client.host,
-        user_agent=request.headers.get("user-agent")
-    )
-    return {"message": "Logout successful"}
-
-@auth_router.post("/auth/logout_all")
-async def logout_all(request: Request, current_user=Depends(get_current_user)):
-    user_id = current_user["user_id"]
-    supabase_client.table("user_sessions").delete().eq("user_id", user_id).execute()
-
-    await log_activity(
-        user_id=user_id,
-        action="logout_all",
-        description="User logged out from all devices",
-        ip=request.client.host,
-        user_agent=request.headers.get("user-agent")
-    )
-    return {"message": "All sessions cleared"}
-
-@auth_router.post("/auth/change_password")
-async def change_password(payload: ChangePasswordRequest, request: Request, current_user=Depends(get_current_user)):
-    user_id = current_user["user_id"]
-    user_res = supabase_client.table("users").select("*").eq("id", user_id).single().execute()
-    if not user_res.data or not bcrypt.verify(payload.old_password, user_res.data["password"]):
-        raise HTTPException(status_code=403, detail="Old password incorrect")
-
-    new_hash = bcrypt.hash(payload.new_password)
-    supabase_client.table("users").update({"password": new_hash}).eq("id", user_id).execute()
-
-    await log_activity(
-        user_id=user_id,
-        action="change_password",
-        description="User changed password",
-        ip=request.client.host,
-        user_agent=request.headers.get("user-agent")
-    )
-    return {"message": "Password changed successfully"}
-
-@auth_router.post("/auth/refresh_token")
+@auth_router.post("/refresh_token")
 async def refresh_token(payload: RefreshTokenRequest, request: Request):
-    try:
-        token_data = verify_token(payload.refresh_token)
-        user_id = token_data.get("user_id") or token_data.get("sub")
+    """
+    ต่ออายุ refresh token (ยังไม่ implement)
+    """
+    raise HTTPException(status_code=404, detail="ยังไม่พร้อมใช้งาน")
 
-        session_res = supabase_client.table("user_sessions")\
-            .select("*")\
-            .eq("refresh_token", payload.refresh_token)\
-            .eq("user_id", user_id)\
-            .single()\
-            .execute()
 
-        if not session_res.data:
-            raise HTTPException(status_code=401, detail="Invalid or expired refresh token")
+@auth_router.post("/logout")
+async def logout(payload: LogoutRequest, request: Request):
+    """
+    ออกจากระบบ (ยังไม่ implement)
+    """
+    raise HTTPException(status_code=404, detail="ยังไม่พร้อมใช้งาน")
 
-        expires_at = datetime.fromisoformat(session_res.data["expires_at"].replace("Z", "+00:00"))
-        if expires_at < datetime.now(timezone.utc):
-            supabase_client.table("user_sessions").delete().eq("id", session_res.data["id"]).execute()
-            raise HTTPException(status_code=401, detail="Refresh token expired")
-
-        new_access_token = create_token({
-            "user_id": user_id,
-            "username": token_data.get("username", ""),
-            "role": token_data.get("role", "member")
-        })
-
-        await log_activity(
-            user_id=user_id,
-            action="refresh_token",
-            description="User refreshed access token",
-            ip=request.client.host,
-            user_agent=request.headers.get("user-agent")
-        )
-
-        return {"access_token": new_access_token}
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Token decode failed")
-
-@auth_router.post("/auth/introspect")
-async def introspect_token(request: Request):
-    token = request.headers.get("authorization")
-    if not token or not token.startswith("Bearer "):
-        raise HTTPException(status_code=400, detail="Missing or invalid authorization header")
-
-    token = token.split(" ")[1]
-    try:
-        payload = verify_token(token)
-        return {"active": True, "claims": payload}
-    except JWTError:
-        return {"active": False}
 
 @auth_router.get("/users/me")
 async def get_me(current_user=Depends(get_current_user)):
+    """
+    ดึงข้อมูลผู้ใช้ปัจจุบันจาก token
+    """
     return {
         "user_id": current_user["user_id"],
         "username": current_user["username"],
-        "role": current_user.get("role", "member")
+        "role": current_user["role"]
     }

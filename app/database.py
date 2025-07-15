@@ -1,4 +1,5 @@
 import os
+import uuid
 from dotenv import load_dotenv
 from app.config import supabase_client
 from datetime import datetime, timedelta
@@ -9,6 +10,11 @@ import logging
 import time
 from fastapi import Request
 from typing import Optional
+
+
+
+
+
 
 
 # ตั้งค่า logging
@@ -26,8 +32,9 @@ camera_cache = TTLCache(maxsize=1, ttl=600)
 watchlist_cache = TTLCache(maxsize=1, ttl=300)
 alerts_cache = TTLCache(maxsize=1, ttl=60)
 
-last_db_access = 0
+logger = logging.getLogger(__name__)
 min_db_access_interval = 0.1
+last_db_access = 0.0
 MAX_RECORDS = 1000
 
 
@@ -43,86 +50,129 @@ def parse_thai_date(date_str):
 
 
 def format_timestamp_thai(timestamp):
+    """
+    แปลง timestamp (iso string หรือ datetime object) เป็นรูป dd/MM/YYYY HH:MM:SS
+    โดยใช้ timezone Asia/Bangkok และปีเป็น พ.ศ. (Buddhist year)
+    """
     if not timestamp:
         return "-"
+
+    # ถ้าเป็น string ให้แปลงกลับเป็น datetime
     if isinstance(timestamp, str):
         try:
+            # รองรับ ISO format ที่มี Z
             timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
         except Exception as e:
             logger.error(f"Error converting timestamp string: {e}")
             return timestamp
+
+    # ตั้ง timezone เป็นกรุงเทพฯ
     thailand_tz = pytz.timezone('Asia/Bangkok')
     local_dt = timestamp.astimezone(thailand_tz)
-    return local_dt.strftime("%d/%m/%Y %H:%M:%S")
+
+    # คำนวณปี พุทธศักราช
+    buddhist_year = local_dt.year + 543
+
+    # format dd/MM/YYYY HH:MM:SS
+    day   = f"{local_dt.day:02d}"
+    month = f"{local_dt.month:02d}"
+    time  = local_dt.strftime("%H:%M:%S")
+
+    return f"{day}/{month}/{buddhist_year} {time}"
 
 
-async def add_plate(plate_number, province=None, id_camera=None, camera_name=None,
-                   user_id=None, timestamp=None,
-                   character_confidences=None, province_confidence=None):
-    global last_db_access
+async def add_plate_candidate(
+    plate_number: str,
+    province: str = None,
+    id_camera: str = None,
+    camera_name: str = None,
+    user_id: str = None,
+    timestamp: str = None,
+    character_confidences: list[float] = None,
+    province_confidence: float = None
+) -> dict:
+    """
+    Insert ลง plate_candidates โดยใช้ id == correlation_id
+    คืนค่าแถวที่สร้าง (มีทั้ง id และ correlation_id)
+    """
+    corr_id = str(uuid.uuid4())
     thailand_tz = pytz.timezone('Asia/Bangkok')
-    now = datetime.now(thailand_tz)
+    now = datetime.now(thailand_tz).isoformat()
 
-    try:
-        current_time = time.time()
-        if current_time - last_db_access < min_db_access_interval:
-            await asyncio.sleep(min_db_access_interval)
+    data = {
+        "id": corr_id,
+        "correlation_id": corr_id,
+        "plate": plate_number,
+        "created_at": timestamp or now,
+    }
+    if user_id:
+        data["uploaded_by"] = user_id
+    if province:
+        data["province"] = province
+    if id_camera:
+        data["id_camera"] = id_camera
+    if camera_name:
+        data["camera_name"] = camera_name
+    if character_confidences is not None:
+        data["character_confidences"] = character_confidences
+    if province_confidence is not None:
+        data["province_confidence"] = province_confidence
 
-        data = {
-            "plate": plate_number,
-            "timestamp": now.isoformat(),
-        }
-        if user_id:
-            data["user_id"] = user_id
-        if province:
-            data["province"] = province
-        if id_camera:
-            data["id_camera"] = id_camera
-        if camera_name:
-            data["camera_name"] = camera_name
+    loop = asyncio.get_event_loop()
+    resp = await loop.run_in_executor(
+        None,
+        lambda: supabase_client
+                 .table("plate_candidates")
+                 .insert(data)
+                 .execute()
+    )
 
-        loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(
-            None,
-            lambda: supabase_client.table("plates").insert(data).execute()
-        )
+    if not getattr(resp, "data", None):
+        raise Exception("Insert plate_candidates failed")
 
-        last_db_access = time.time()
+    return resp.data[0]
 
-        if hasattr(response, 'error') and response.error:
-            logger.error(f"Database Error: {response.error}")
-            raise Exception(f"Database Error: {response.error}")
 
-        plate_id = response.data[0]["id"]
+async def add_plate_image(
+    correlation_id: str,
+    image_path: str,
+    uploaded_by: str = None,
+    notes: str = None,
+    image_name: str = None
+) -> dict:
+    """
+    Insert ลง plate_images โดยเชื่อมด้วย correlation_id
+    คืนค่าแถวที่สร้าง
+    """
+    thailand_tz = pytz.timezone('Asia/Bangkok')
+    now = datetime.now(thailand_tz).isoformat()
 
-        # แยกตัวอักษรและเพิ่มข้อมูลเข้า plate_characters
-        if plate_number and character_confidences:
-            char_data = []
-            for idx, char in enumerate(plate_number):
-                char_data.append({
-                    "plate_id": plate_id,
-                    "character": char,
-                    "character_confidence": character_confidences[idx] if idx < len(character_confidences) else None,
-                    "province": province,
-                    "province_confidence": province_confidence,
-                })
-            for entry in char_data:
-                await loop.run_in_executor(
-                    None,
-                    lambda e=entry: supabase_client.table("plate_characters").insert(e).execute()
-                )
+    data = {
+        "correlation_id": correlation_id,
+        "image_path": image_path,
+        "uploaded_at": now
+    }
+    if uploaded_by:
+        data["uploaded_by"] = uploaded_by
+    if notes:
+        data["notes"] = notes
+    if image_name:
+        data["image_name"] = image_name
 
-        if plate_number in plates_cache:
-            del plates_cache[plate_number]
-        search_cache.clear()
-        all_plates_cache.clear()
-        alerts_cache.clear()
+    loop = asyncio.get_event_loop()
+    resp = await loop.run_in_executor(
+        None,
+        lambda: supabase_client
+                 .table("plate_images")
+                 .insert(data)
+                 .execute()
+    )
 
-        logger.info(f"Added plate to database: {plate_number}")
-        return True
-    except Exception as e:
-        logger.error(f"Database Exception: {e}")
-        raise
+    if not getattr(resp, "data", None):
+        raise Exception("Insert plate_images failed")
+
+    return resp.data[0]
+
 
 async def search_plates(
     search_term=None,
@@ -659,98 +709,69 @@ async def clear_caches():
         logger.error(f"Clear Caches Exception: {e}")
         return False
     
-async def add_plate_candidate(plate_number, province=None, id_camera=None, camera_name=None,
-                              user_id=None, timestamp=None,
-                              character_confidences=None, province_confidence=None):
-    global last_db_access
-    thailand_tz = pytz.timezone('Asia/Bangkok')
-    now = datetime.now(thailand_tz)
 
-    try:
-        current_time = time.time()
-        if current_time - last_db_access < min_db_access_interval:
-            await asyncio.sleep(min_db_access_interval)
 
-        data = {
-            "plate": plate_number,
-            "created_at": now.isoformat()
-        }
-        if user_id:
-            data["uploaded_by"] = user_id
-        if province:
-            data["province"] = province
-        if id_camera:
-            data["id_camera"] = id_camera
-        if camera_name:
-            data["camera_name"] = camera_name
 
-        loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(
-            None,
-            lambda: supabase_client.table("plate_candidates").insert(data).execute()
-        )
-
-        last_db_access = time.time()
-
-        if hasattr(response, 'error') and response.error:
-            logger.error(f"Database Error: {response.error}")
-            raise Exception(f"Database Error: {response.error}")
-
-        return response.data[0]
-    except Exception as e:
-        logger.error(f"Database Exception: {e}")
-        raise
-
-async def verify_plate_candidate(candidate_id: str, verified_by_user_id: Optional[str] = None):
+async def verify_plate_candidate(candidate_id: str, verified_by_user_id: str) -> str:
     """
-    ยืนยันป้ายจาก plate_candidates และย้ายไปยัง plates
+    1) Fetch candidate จาก plate_candidates
+    2) Insert ลง plates → คืน new_plate_id
+    3) Insert แต่ละตัวอักษร+confidence ลง plate_characters
+    4) Update plate_images ให้มี plate_id และ is_verified=True
+    5) Delete candidate ทิ้ง
     """
-    from app.config import supabase_client
-    from datetime import datetime
+    # 1) ดึง candidate
+    resp = supabase_client.table("plate_candidates") \
+                          .select("*") \
+                          .eq("id", candidate_id) \
+                          .single() \
+                          .execute()
+    if not resp.data:
+        raise Exception("Candidate not found")
+    cand = resp.data
 
-    try:
-        # 1. ดึงข้อมูลจาก plate_candidates
-        candidate_res = supabase_client.table("plate_candidates").select("*").eq("id", candidate_id).single().execute()
-        if not candidate_res.data:
-            raise Exception("ไม่พบข้อมูลใน plate_candidates")
+    # 2) Insert ลง plates
+    now_iso = datetime.utcnow().isoformat()
+    ins = supabase_client.table("plates").insert({
+        "plate":        cand["plate"],
+        "province":     cand.get("province"),
+        "id_camera":    cand.get("id_camera"),
+        "camera_name":  cand.get("camera_name"),
+        "user_id":      verified_by_user_id,
+        "timestamp":    now_iso,
+        "is_verified":  True,
+        "created_at":   now_iso
+    }).execute()
+    new_plate_id = ins.data[0]["id"]
 
-        candidate = candidate_res.data
+    # 3) Insert ตัวอักษร + confidence ลง plate_characters
+    #    สมมติ cand["character_confidences"] = [94.2, 88.3, ...]
+    for idx, conf in enumerate(cand.get("character_confidences") or []):
+        ch = cand["plate"][idx]
+        supabase_client.table("plate_characters").insert({
+            "id":         str(uuid.uuid4()),
+            "plate_id":   new_plate_id,
+            "type":       "character",
+            "position":   idx,
+            "character":  ch,
+            "confidence": conf
+        }).execute()
 
-        # 2. ย้ายข้อมูลไปยัง plates
-        new_plate = {
-            "plate": candidate["plate"],
-            "province": candidate.get("province"),
-            "id_camera": candidate.get("id_camera"),
-            "camera_name": candidate.get("camera_name"),
-            "user_id": verified_by_user_id,
-            "image_id": candidate.get("image_id"),
-            "is_verified": True,
-            "timestamp": datetime.now().isoformat()
-        }
+    # 4) Update plate_images
+    supabase_client.table("plate_images") \
+                  .update({"plate_id": new_plate_id, "is_verified": True}) \
+                  .eq("correlation_id", cand["correlation_id"]) \
+                  .execute()
 
-        insert_res = supabase_client.table("plates").insert(new_plate).execute()
-        if hasattr(insert_res, "error") and insert_res.error:
-            raise Exception(f"Insert failed: {insert_res.error}")
+    # 5) Delete candidate
+    supabase_client.table("plate_candidates") \
+                  .delete() \
+                  .eq("id", candidate_id) \
+                  .execute()
 
-        plate_id = insert_res.data[0]["id"]
+    return new_plate_id
 
-        # 3. อัปเดต plate_images.plate_id ถ้ามี
-        if candidate.get("image_id"):
-            image_update_res = supabase_client.table("plate_images").update({
-                "plate_id": plate_id,
-                "is_verified": True
-            }).eq("id", candidate["image_id"]).execute()
-            if hasattr(image_update_res, "error") and image_update_res.error:
-                raise Exception(f"Update image failed: {image_update_res.error}")
 
-        # 4. ลบออกจาก plate_candidates
-        delete_res = supabase_client.table("plate_candidates").delete().eq("id", candidate_id).execute()
-        if hasattr(delete_res, "error") and delete_res.error:
-            raise Exception(f"Delete candidate failed: {delete_res.error}")
-
-        return plate_id
-    except Exception as e:
-        raise Exception(f"Verify failed: {e}")
 
 
 async def get_plate_candidates():
