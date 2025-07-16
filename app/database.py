@@ -140,20 +140,16 @@ async def add_plate_image(
     notes: str = None,
     image_name: str = None
 ) -> dict:
-    """
-    Insert ลง plate_images โดยเชื่อมด้วย correlation_id
-    คืนค่าแถวที่สร้าง
-    """
     thailand_tz = pytz.timezone('Asia/Bangkok')
     now = datetime.now(thailand_tz).isoformat()
 
     data = {
         "correlation_id": correlation_id,
         "image_path": image_path,
-        "uploaded_at": now
+        "uploaded_at": now,
+        "uploaded_by": uploaded_by  # ✅ แก้ตรงนี้
     }
-    if uploaded_by:
-        data["uploaded_by"] = uploaded_by
+
     if notes:
         data["notes"] = notes
     if image_name:
@@ -172,6 +168,7 @@ async def add_plate_image(
         raise Exception("Insert plate_images failed")
 
     return resp.data[0]
+
 
 
 async def search_plates(

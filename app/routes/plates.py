@@ -2,6 +2,8 @@ from typing import Optional, List
 from datetime import datetime
 import logging
 from fastapi import APIRouter, HTTPException, Depends, File, UploadFile, Form
+from app.config import supabase_client
+import uuid
 
 from app.routes.auth import get_current_user
 from app.routes.auth_extra import is_admin
@@ -82,54 +84,33 @@ async def add_plate_route(
 
 
 @plates_router.post("/upload_image")
-async def upload_plate_image(
-    correlation_id: str | None = Form(None),
-    image: UploadFile = File(...),
-    user: dict = Depends(get_current_user)
+async def upload_image_no_auth(
+    file: UploadFile = File(...)
 ):
-    """
-    รับภาพผ่าน multipart/form-data พร้อม optional 'correlation_id':
-    - ถ้ามี correlation_id ใน form ให้ใช้ตรงนั้น
-    - ถ้าไม่มี ให้แยกจากชื่อไฟล์ (เช่น "{correlation_id}_crop.jpg")
-    จากนั้นอัปโหลดไฟล์ขึ้น Supabase Storage แล้วบันทึก URL ลงฐาน
-    """
     try:
-        # อ่านไฟล์เป็น bytes
-        data = await image.read()
+        filename = file.filename
+        contents = await file.read()
 
-        # อัปโหลดไปที่ bucket "images"
-        result = await supabase_client.storage.from_("images").upload(image.filename, data)
-        if hasattr(result, "error") and result.error:
-            raise HTTPException(status_code=500, detail="Error uploading image to storage")
-
-        # สร้าง public URL
-        image_url = f"{SUPABASE_URL}/storage/v1/object/public/images/{image.filename}"
-
-        # ถ้าไม่ส่ง correlation_id มา ให้ infer จากชื่อไฟล์
-        if not correlation_id:
-            correlation_id = image.filename.split("_", 1)[0]
-
-        # บันทึก metadata ลงตาราง plate_images
-        row = await add_plate_image(
-            correlation_id=correlation_id,
-            image_path=image_url,
-            uploaded_by=user["user_id"],
-            image_name=image.filename
+        supabase_client.storage.from_("plates").upload(
+            path=filename,
+            file=contents,
         )
 
-        # บันทึก log กิจกรรม
-        await log_activity(
-            user_id=user["user_id"],
-            action="upload_plate_image",
-            description=f"Uploaded image {image.filename} for correlation_id {correlation_id}"
-        )
+        now = datetime.utcnow().isoformat()
+        image_id = str(uuid.uuid4())
 
-        return {"message": "Image uploaded", "image_id": row["id"]}
+        supabase_client.table("plate_images").insert({
+            "id": image_id,
+            "image_path": filename,
+            "image_name": filename,
+            "uploaded_at": now,
+            "is_verified": False
+        }).execute()
 
-    except HTTPException:
-        raise
+        return {"status": "success", "image_id": image_id}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return {"status": "error", "detail": str(e)}
+
 
 
 

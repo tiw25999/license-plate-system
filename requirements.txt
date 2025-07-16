@@ -2,33 +2,19 @@ fastapi==0.95.2
 uvicorn==0.27.0
 pydantic==1.10.13
 
-# Supabase client
 supabase==1.0.3
 httpx==0.23.3
 python-dotenv==1.0.0
 
-# ✅ Auth & Security
-python-jose[cryptography]==3.3.0  # สำหรับ JWT encode/decode
-passlib[bcrypt]==1.7.4             # สำหรับ password hashing
-bcrypt==4.0.1                      # ใช้คู่กับ passlib ให้เวอร์ชันนี้ที่เสถียร
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+bcrypt==4.0.1
 
-# ✅ Upload multipart/form-data
 python-multipart==0.0.7
-
-# ✅ Timezone handling
 pytz==2023.3
+typing-extensions==4.6.3
 
-# ✅ Static typing support
-typing-extensions==4.8.0
-
-# ✅ Caching
 cachetools==5.3.1
-
-# ✅ SQLAlchemy ORM
 SQLAlchemy==1.4.49
-
-# ✅ Rate Limiting Middleware
 slowapi==0.1.5
-
-# ✅ Optional utilities for debugging and development
 requests==2.31.0
