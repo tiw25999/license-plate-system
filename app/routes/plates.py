@@ -305,3 +305,29 @@ async def get_activity_logs_route(
     if getattr(resp, "error", None):
         raise HTTPException(status_code=500, detail=str(resp.error))
     return resp.data or []
+
+@plates_router.delete("/delete_image/{image_name:path}")  # 🔁 เปลี่ยนตรงนี้
+async def delete_plate_image_route(image_name: str, current_user=Depends(get_current_user)):
+    """
+    ลบภาพออกจาก Supabase Storage bucket 'plates'
+    → Authenticated
+    """
+    try:
+        resp = supabase_client.storage \
+            .from_("plates") \
+            .remove([image_name])
+
+        if getattr(resp, "error", None):
+            raise HTTPException(status_code=500, detail=str(resp.error))
+
+        await log_activity(
+            user_id=current_user["user_id"],
+            action="delete_plate_image",
+            description=f"Deleted image: {image_name}"
+        )
+
+        return {"status": "success", "deleted": image_name}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
