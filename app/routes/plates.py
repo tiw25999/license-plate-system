@@ -1,7 +1,7 @@
 from typing import Optional, List
 from datetime import datetime
 import logging
-from fastapi import APIRouter, HTTPException, Depends, File, UploadFile, Form,  Body
+from fastapi import APIRouter, HTTPException, Depends, File, UploadFile, Form, Body
 from app.config import supabase_client, SUPABASE_URL
 import uuid
 
@@ -165,6 +165,7 @@ async def get_plates_route():
     """
     ดึงป้ายที่ verify แล้วทั้งหมด
     → เรียงลำดับใหม่สุดก่อน ตาม created_at
+    → คืน raw dict พร้อม `id` และ `timestamp`
     """
     try:
         resp = supabase_client \
@@ -175,7 +176,13 @@ async def get_plates_route():
         if getattr(resp, "error", None):
             logger.error(f"Error fetching plates: {resp.error}")
             raise HTTPException(status_code=500, detail=str(resp.error))
-        return resp.data or []
+
+        data = resp.data or []
+        # แปลงชื่อคีย์ created_at → timestamp
+        for item in data:
+            item["timestamp"] = item.pop("created_at")
+        return data
+
     except Exception as e:
         logger.error(f"Get Plates Exception: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -208,7 +215,7 @@ async def get_plate_images_from_db(limit: int = 30, current_user=Depends(get_cur
 
 @plates_router.delete("/delete_plate/{plate_id}")
 async def delete_plate_route(
-    plate_id: int,
+    plate_id: str,
     current_user=Depends(is_admin)
 ):
     """
@@ -224,12 +231,14 @@ async def delete_plate_route(
         if getattr(resp, "error", None):
             logger.error(f"Error deleting plate: {resp.error}")
             raise HTTPException(status_code=500, detail=str(resp.error))
+
         await log_activity(
             user_id=current_user["user_id"],
             action="delete_plate",
             description=f"Deleted plate {plate_id}"
         )
         return {"message": "Deleted successfully", "deleted_id": plate_id}
+
     except Exception as e:
         logger.error(f"Delete Plate Exception: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -296,7 +305,6 @@ async def edit_plate_candidate_route(
       - id_camera
       ฯลฯ
     """
-    # แปลง key 'plate_number' ให้เป็น 'plate' ก่อนเรียก database
     mapped: dict = {}
     for key, value in update_data.items():
         if key == "plate_number":
@@ -319,4 +327,3 @@ async def edit_plate_candidate_route(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-

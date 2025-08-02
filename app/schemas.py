@@ -64,6 +64,7 @@ class PlateBase(BaseModel):
     camera_name: Optional[str] = Field(None, description="ชื่อกล้อง")
 
 class PlateModel(PlateBase):
+    id: str = Field(..., description="UUID ของป้าย")
     timestamp: str = Field(..., description="เวลาที่สร้าง (แสดงผลไทย)")
 
 # ——————————————————————————————————————————
