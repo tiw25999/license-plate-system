@@ -711,13 +711,13 @@ async def clear_caches():
 
 async def verify_plate_candidate(candidate_id: str, verified_by_user_id: str) -> str:
     """
-    1) Fetch candidate จาก plate_candidates
-    2) Insert ลง plates → คืน new_plate_id
-    3) Insert แต่ละตัวอักษร+confidence ลง plate_characters
+    1) Fetch candidate จาก plate_candidates 
+    2) Insert ลง plates โดยใช้ timestamp เดิมจาก candidate.created_at
+    3) Insert ตัวอักษร+confidence ลง plate_characters
     4) Update plate_images ให้มี plate_id และ is_verified=True
     5) Delete candidate ทิ้ง
     """
-    # 1) ดึง candidate
+    # 1) ดึงข้อมูล candidate พร้อม created_at
     resp = supabase_client.table("plate_candidates") \
                           .select("*") \
                           .eq("id", candidate_id) \
@@ -727,22 +727,23 @@ async def verify_plate_candidate(candidate_id: str, verified_by_user_id: str) ->
         raise Exception("Candidate not found")
     cand = resp.data
 
-    # 2) Insert ลง plates
-    now_iso = datetime.utcnow().isoformat()
+    # ดึง timestamp เดิมจาก candidate
+    original_ts = cand["created_at"]
+
+    # 2) Insert ลง plates → คืน new_plate_id
     ins = supabase_client.table("plates").insert({
         "plate":        cand["plate"],
         "province":     cand.get("province"),
         "id_camera":    cand.get("id_camera"),
         "camera_name":  cand.get("camera_name"),
         "user_id":      verified_by_user_id,
-        "timestamp":    now_iso,
+        "timestamp":    original_ts,      # ใช้เวลาจากตอนส่งเข้าหน้า verify
         "is_verified":  True,
-        "created_at":   now_iso
+        "created_at":   original_ts       # เก็บ created_at เดิมไว้ด้วย
     }).execute()
     new_plate_id = ins.data[0]["id"]
 
     # 3) Insert ตัวอักษร + confidence ลง plate_characters
-    #    สมมติ cand["character_confidences"] = [94.2, 88.3, ...]
     for idx, conf in enumerate(cand.get("character_confidences") or []):
         ch = cand["plate"][idx]
         supabase_client.table("plate_characters").insert({
@@ -754,19 +755,20 @@ async def verify_plate_candidate(candidate_id: str, verified_by_user_id: str) ->
             "confidence": conf
         }).execute()
 
-    # 4) Update plate_images
+    # 4) Update plate_images ให้เชื่อมต่อกับ new_plate_id
     supabase_client.table("plate_images") \
                   .update({"plate_id": new_plate_id, "is_verified": True}) \
                   .eq("correlation_id", cand["correlation_id"]) \
                   .execute()
 
-    # 5) Delete candidate
+    # 5) ลบ candidate ทิ้ง
     supabase_client.table("plate_candidates") \
                   .delete() \
                   .eq("id", candidate_id) \
                   .execute()
 
     return new_plate_id
+
 
 
 
@@ -825,3 +827,22 @@ async def edit_plate(plate_id: str, new_plate: str, edited_by: Optional[str] = N
     }).execute()
 
     return {"message": "แก้ไขสำเร็จ", "old": old_plate, "new": new_plate}
+
+
+async def edit_plate_candidate(candidate_id: str, update_data: dict) -> dict:
+    """
+    แก้ไขข้อมูลใน plate_candidates
+    - update_data: dict ของ field ที่ต้องการแก้ เช่น {"plate": "กข1234", "province": "กรุงเทพ"}
+    """
+    if not update_data:
+        raise ValueError("ไม่มีข้อมูลที่ต้องการแก้ไข")
+
+    resp = supabase_client.table("plate_candidates") \
+                          .update(update_data) \
+                          .eq("id", candidate_id) \
+                          .execute()
+
+    if getattr(resp, "error", None):
+        raise Exception(f"Update failed: {resp.error}")
+
+    return resp.data[0] if resp.data else {"message": "updated"}

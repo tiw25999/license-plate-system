@@ -1,8 +1,8 @@
 from typing import Optional, List
 from datetime import datetime
 import logging
-from fastapi import APIRouter, HTTPException, Depends, File, UploadFile, Form
-from app.config import supabase_client
+from fastapi import APIRouter, HTTPException, Depends, File, UploadFile, Form,  Body
+from app.config import supabase_client, SUPABASE_URL
 import uuid
 
 from app.routes.auth import get_current_user
@@ -25,12 +25,13 @@ from app.database import (
     get_alerts,
     edit_plate,
     add_plate_image,
+    edit_plate_candidate,
 )
 from app.utils.log_utils import log_activity
-from app.config import supabase_client, SUPABASE_URL
 
 logger = logging.getLogger(__name__)
 plates_router = APIRouter(prefix="/plates", tags=["plates"])
+
 
 @plates_router.post("/add_plate", response_model=PlateResponse)
 async def add_plate_route(
@@ -49,20 +50,15 @@ async def add_plate_route(
             province=candidate.province,
             id_camera=candidate.id_camera,
             camera_name=candidate.camera_name,
-            user_id=None,  # ไม่มีผู้ใช้ (หรือใส่ค่าอื่นตามต้องการ)
-            # ลบการอ้างอิง candidate.timestamp ออก
+            user_id=None,
             character_confidences=[ci.confidence for ci in candidate.character_confidences],
             province_confidence=candidate.province_confidence
         )
-
-        # เขียน log กิจกรรม (user_id=None)
         await log_activity(
             user_id=None,
             action="add_plate_candidate",
             description=f"Plate candidate added: {row['correlation_id']}"
         )
-
-        # สร้าง Response ตาม schema
         return PlateResponse(
             id=row["id"],
             correlation_id=row["correlation_id"],
@@ -78,7 +74,6 @@ async def add_plate_route(
             ],
             province_confidence=row.get("province_confidence")
         )
-
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -90,15 +85,12 @@ async def upload_image_no_auth(
     try:
         filename = file.filename
         contents = await file.read()
-
         supabase_client.storage.from_("plates").upload(
             path=filename,
             file=contents,
         )
-
         now = datetime.utcnow().isoformat()
         image_id = str(uuid.uuid4())
-
         supabase_client.table("plate_images").insert({
             "id": image_id,
             "image_path": filename,
@@ -106,13 +98,9 @@ async def upload_image_no_auth(
             "uploaded_at": now,
             "is_verified": False
         }).execute()
-
         return {"status": "success", "image_id": image_id}
     except Exception as e:
         return {"status": "error", "detail": str(e)}
-
-
-
 
 
 @plates_router.get("/candidates", response_model=List[PlateResponse])
@@ -138,6 +126,7 @@ async def list_plate_candidates_route(current_user=Depends(is_admin)):
             province_confidence=item.get("province_confidence")
         ))
     return out
+
 
 @plates_router.post("/verify_plate/{candidate_id}")
 async def verify_plate_candidate_route(
@@ -178,25 +167,43 @@ async def get_plates_route():
     → เรียงลำดับใหม่สุดก่อน ตาม created_at
     """
     try:
-        # เรียก Supabase client แบบ synchronous (ไม่ต้อง await)
         resp = supabase_client \
             .table("plates") \
             .select("*") \
             .order("created_at", desc=True) \
             .execute()
-
-        # เช็ค error จาก APIResponse
         if getattr(resp, "error", None):
             logger.error(f"Error fetching plates: {resp.error}")
             raise HTTPException(status_code=500, detail=str(resp.error))
-
-        # คืน data หรือคืน empty list ถ้าไม่มี
         return resp.data or []
-
     except Exception as e:
         logger.error(f"Get Plates Exception: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-    
+
+
+@plates_router.get("/db_images")
+async def get_plate_images_from_db(limit: int = 30, current_user=Depends(get_current_user)):
+    try:
+        resp = supabase_client.table("plate_images") \
+            .select("image_name") \
+            .eq("is_verified", False) \
+            .order("uploaded_at", desc=True) \
+            .limit(limit) \
+            .execute()
+        if getattr(resp, "error", None):
+            logger.error(f"Error fetching plate_images: {resp.error}")
+            raise HTTPException(status_code=500, detail=str(resp.error))
+        images = [
+            {
+                "name": item["image_name"],
+                "url": f"{SUPABASE_URL}/storage/v1/object/public/plates/{item['image_name']}"
+            }
+            for item in resp.data or []
+        ]
+        return images
+    except Exception as e:
+        logger.error(f"Get plate_images error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @plates_router.delete("/delete_plate/{plate_id}")
@@ -209,29 +216,23 @@ async def delete_plate_route(
     → เฉพาะ admin เท่านั้น
     """
     try:
-        # ลบ row จาก Supabase
         resp = supabase_client \
             .table("plates") \
             .delete() \
             .eq("id", plate_id) \
             .execute()
-
         if getattr(resp, "error", None):
             logger.error(f"Error deleting plate: {resp.error}")
             raise HTTPException(status_code=500, detail=str(resp.error))
-
-        # เขียน log กิจกรรม
         await log_activity(
             user_id=current_user["user_id"],
             action="delete_plate",
             description=f"Deleted plate {plate_id}"
         )
-
         return {"message": "Deleted successfully", "deleted_id": plate_id}
     except Exception as e:
         logger.error(f"Delete Plate Exception: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
 
 
 @plates_router.get("/search", response_model=List[PlateModel])
@@ -254,80 +255,68 @@ async def get_alerts_route(status: Optional[str] = None):
     return await get_alerts(status)
 
 
-@plates_router.put("/edit_plate/{plate_id}")
-async def edit_plate_route(
-    plate_id: str,
-    new_plate: str,
-    reason: Optional[str] = None,
-    request=None,
-    current_user=Depends(is_admin)
-):
-    result = await edit_plate(
-        plate_id,
-        new_plate,
-        edited_by=current_user["user_id"],
-        reason=reason
-    )
-    await log_activity(
-        user_id=current_user["user_id"],
-        action="edit_plate",
-        description=f"Edited plate {plate_id} → {new_plate}. Reason: {reason}",
-        ip=request.client.host if request else None,
-        user_agent=request.headers.get("user-agent") if request else None
-    )
-    return result
-
-
-@plates_router.get("/plate/history/{plate_id}")
-async def get_plate_history_route(
-    plate_id: str,
-    current_user=Depends(get_current_user)
-):
-    resp = supabase_client.table("plate_edits") \
-                         .select("*") \
-                         .eq("plate_id", plate_id) \
-                         .order("edited_at", desc=True) \
-                         .execute()
-    if getattr(resp, "error", None):
-        raise HTTPException(status_code=500, detail=str(resp.error))
-    return resp.data or []
-
-
-@plates_router.get("/logs/activity")
-async def get_activity_logs_route(
-    current_user=Depends(is_admin)
-):
-    resp = supabase_client.table("activity_logs") \
-                         .select("*") \
-                         .order("created_at", desc=True) \
-                         .limit(100) \
-                         .execute()
-    if getattr(resp, "error", None):
-        raise HTTPException(status_code=500, detail=str(resp.error))
-    return resp.data or []
-
-@plates_router.delete("/delete_image/{image_name:path}")  # 🔁 เปลี่ยนตรงนี้
+@plates_router.delete("/delete_image/{image_name:path}")
 async def delete_plate_image_route(image_name: str, current_user=Depends(get_current_user)):
-    """
-    ลบภาพออกจาก Supabase Storage bucket 'plates'
-    → Authenticated
-    """
     try:
-        resp = supabase_client.storage \
-            .from_("plates") \
-            .remove([image_name])
-
+        # ลบไฟล์จาก storage
+        resp = supabase_client.storage.from_("plates").remove([image_name])
         if getattr(resp, "error", None):
             raise HTTPException(status_code=500, detail=str(resp.error))
+
+        # ลบแถวจาก table plate_images
+        supabase_client.table("plate_images") \
+            .delete() \
+            .eq("image_name", image_name) \
+            .execute()
 
         await log_activity(
             user_id=current_user["user_id"],
             action="delete_plate_image",
-            description=f"Deleted image: {image_name}"
+            description=f"Deleted image and record: {image_name}"
         )
 
         return {"status": "success", "deleted": image_name}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
+
+@plates_router.patch("/candidates/{candidate_id}")
+@plates_router.put("/candidates/{candidate_id}")
+async def edit_plate_candidate_route(
+    candidate_id: str,
+    update_data: dict = Body(...),
+    current_user=Depends(get_current_user)
+):
+    """
+    แก้ไขฟิลด์ใดๆ ของ plate_candidates ตาม update_data
+    รองรับ front-end field:
+      - plate_number  → แปลงเป็น DB col 'plate'
+      - province
+      - camera_name
+      - id_camera
+      ฯลฯ
+    """
+    # แปลง key 'plate_number' ให้เป็น 'plate' ก่อนเรียก database
+    mapped: dict = {}
+    for key, value in update_data.items():
+        if key == "plate_number":
+            mapped["plate"] = value
+        else:
+            mapped[key] = value
+
+    try:
+        updated = await edit_plate_candidate(candidate_id, mapped)
+
+        await log_activity(
+            user_id=current_user["user_id"],
+            action="edit_plate_candidate",
+            description=f"Edited candidate {candidate_id}: {mapped}"
+        )
+
+        return {
+            "message": "Updated successfully",
+            "updated": updated
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
