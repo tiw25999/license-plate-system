@@ -1,7 +1,8 @@
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from datetime import datetime
 import logging
-from fastapi import APIRouter, HTTPException, Depends, File, UploadFile, Form, Body
+import json
+from fastapi import APIRouter, HTTPException, Depends, File, UploadFile, Body, Request
 from app.config import supabase_client, SUPABASE_URL
 import uuid
 
@@ -21,8 +22,6 @@ from app.database import (
     get_plates,
     search_plates,
     get_cameras,
-    get_watchlists,
-    get_alerts,
     edit_plate,
     add_plate_image,
     edit_plate_candidate,
@@ -34,9 +33,7 @@ plates_router = APIRouter(prefix="/plates", tags=["plates"])
 
 
 @plates_router.post("/add_plate", response_model=PlateResponse)
-async def add_plate_route(
-    candidate: PlateAddDetailedRequest
-):
+async def add_plate_route(candidate: PlateAddDetailedRequest, request: Request):
     """
     รับข้อมูล plate candidate จาก Cira core
     → ไม่ต้องมี JWT
@@ -44,7 +41,6 @@ async def add_plate_route(
     → คืนค่า PlateResponse พร้อม correlation_id
     """
     try:
-        # บันทึกลงฐานข้อมูล (timestamp ใช้ default ของ add_plate_candidate)
         row = await add_plate_candidate(
             plate_number=candidate.plate_number,
             province=candidate.province,
@@ -57,7 +53,9 @@ async def add_plate_route(
         await log_activity(
             user_id=None,
             action="add_plate_candidate",
-            description=f"Plate candidate added: {row['correlation_id']}"
+            description=f"Plate candidate added: {row['correlation_id']}",
+            ip=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent")
         )
         return PlateResponse(
             id=row["id"],
@@ -79,9 +77,10 @@ async def add_plate_route(
 
 
 @plates_router.post("/upload_image")
-async def upload_image_no_auth(
-    file: UploadFile = File(...)
-):
+async def upload_image_no_auth(file: UploadFile = File(...), request: Request = None):
+    """
+    อัปโหลดภาพเข้าที่ storage และบันทึก record ใน plate_images (ไม่ผูกผู้ใช้)
+    """
     try:
         filename = file.filename
         contents = await file.read()
@@ -98,6 +97,14 @@ async def upload_image_no_auth(
             "uploaded_at": now,
             "is_verified": False
         }).execute()
+
+        await log_activity(
+            user_id=None,
+            action="upload_image",
+            description=f"uploaded={filename}",
+            ip=request.client.host if request and request.client else None,
+            user_agent=request.headers.get("user-agent") if request else None
+        )
         return {"status": "success", "image_id": image_id}
     except Exception as e:
         return {"status": "error", "detail": str(e)}
@@ -131,10 +138,18 @@ async def list_plate_candidates_route(current_user=Depends(is_admin)):
 @plates_router.post("/verify_plate/{candidate_id}")
 async def verify_plate_candidate_route(
     candidate_id: str,
-    user: dict = Depends(get_current_user)
+    user: dict = Depends(get_current_user),
+    request: Request = None
 ):
     try:
         plate_id = await verify_plate_candidate(candidate_id, verified_by_user_id=user["user_id"])
+        await log_activity(
+            user_id=user["user_id"],
+            action="verify_plate",
+            description=f"candidate={candidate_id} -> plate={plate_id}",
+            ip=request.client.host if request and request.client else None,
+            user_agent=request.headers.get("user-agent") if request else None
+        )
         return {"message": "Verified successfully", "plate_id": plate_id}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -143,7 +158,8 @@ async def verify_plate_candidate_route(
 @plates_router.delete("/candidates/{candidate_id}")
 async def reject_plate_candidate_route(
     candidate_id: str,
-    user: dict = Depends(get_current_user)
+    user: dict = Depends(get_current_user),
+    request: Request = None
 ):
     resp = supabase_client.table("plate_candidates") \
                          .delete() \
@@ -155,7 +171,9 @@ async def reject_plate_candidate_route(
     await log_activity(
         user["user_id"],
         "reject_plate",
-        f"Rejected plate candidate {candidate_id}"
+        f"Rejected plate candidate {candidate_id}",
+        ip=request.client.host if request and request.client else None,
+        user_agent=request.headers.get("user-agent") if request else None
     )
     return {"message": "Rejected successfully"}
 
@@ -216,7 +234,8 @@ async def get_plate_images_from_db(limit: int = 30, current_user=Depends(get_cur
 @plates_router.delete("/delete_plate/{plate_id}")
 async def delete_plate_route(
     plate_id: str,
-    current_user=Depends(is_admin)
+    current_user=Depends(is_admin),
+    request: Request = None
 ):
     """
     ลบป้ายที่ verify แล้ว จากตาราง `plates`
@@ -235,7 +254,9 @@ async def delete_plate_route(
         await log_activity(
             user_id=current_user["user_id"],
             action="delete_plate",
-            description=f"Deleted plate {plate_id}"
+            description=f"Deleted plate {plate_id}",
+            ip=request.client.host if request and request.client else None,
+            user_agent=request.headers.get("user-agent") if request else None
         )
         return {"message": "Deleted successfully", "deleted_id": plate_id}
 
@@ -254,18 +275,8 @@ async def get_cameras_route():
     return await get_cameras()
 
 
-@plates_router.get("/get_watchlists")
-async def get_watchlists_route():
-    return await get_watchlists(user_id=None, is_admin=False)
-
-
-@plates_router.get("/get_alerts")
-async def get_alerts_route(status: Optional[str] = None):
-    return await get_alerts(status)
-
-
 @plates_router.delete("/delete_image/{image_name:path}")
-async def delete_plate_image_route(image_name: str, current_user=Depends(get_current_user)):
+async def delete_plate_image_route(image_name: str, current_user=Depends(get_current_user), request: Request = None):
     try:
         # ลบไฟล์จาก storage
         resp = supabase_client.storage.from_("plates").remove([image_name])
@@ -281,7 +292,9 @@ async def delete_plate_image_route(image_name: str, current_user=Depends(get_cur
         await log_activity(
             user_id=current_user["user_id"],
             action="delete_plate_image",
-            description=f"Deleted image and record: {image_name}"
+            description=f"Deleted image and record: {image_name}",
+            ip=request.client.host if request and request.client else None,
+            user_agent=request.headers.get("user-agent") if request else None
         )
 
         return {"status": "success", "deleted": image_name}
@@ -289,37 +302,73 @@ async def delete_plate_image_route(image_name: str, current_user=Depends(get_cur
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ---------- แก้ไขเฉพาะหน้า Verify + LOG + plate_edits ช่วง pre-verify ----------
 @plates_router.patch("/candidates/{candidate_id}")
 @plates_router.put("/candidates/{candidate_id}")
 async def edit_plate_candidate_route(
     candidate_id: str,
     update_data: dict = Body(...),
-    current_user=Depends(get_current_user)
+    current_user=Depends(get_current_user),
+    request: Request = None
 ):
     """
     แก้ไขฟิลด์ใดๆ ของ plate_candidates ตาม update_data
     รองรับ front-end field:
       - plate_number  → แปลงเป็น DB col 'plate'
-      - province
-      - camera_name
-      - id_camera
-      ฯลฯ
+      - province, camera_name, id_camera ฯลฯ
+    - ถ้าเลขป้ายเปลี่ยน → แทรก log ลง table `plate_edits` ทันที (ยังไม่มี plate_id ก็ปล่อยให้เป็น NULL)
+      และ reason จะถูกตั้งเป็น "pre-verify edit (candidate_id=<id>)"
+    - เก็บ activity_logs ด้วย (action=edit_plate_candidate, description=diff old→new)
     """
-    mapped: dict = {}
+    # map field จากฝั่ง UI
+    mapped: Dict[str, Any] = {}
     for key, value in update_data.items():
         if key == "plate_number":
             mapped["plate"] = value
         else:
             mapped[key] = value
 
+    # ดึงค่าเดิมเพื่อคำนวณ diff
+    before_res = supabase_client.table("plate_candidates").select("*").eq("id", candidate_id).single().execute()
+    if not before_res.data:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+    before = before_res.data
+
     try:
         updated = await edit_plate_candidate(candidate_id, mapped)
 
-        await log_activity(
-            user_id=current_user["user_id"],
-            action="edit_plate_candidate",
-            description=f"Edited candidate {candidate_id}: {mapped}"
-        )
+        # ทำ diff
+        diffs = {}
+        for k, new_val in mapped.items():
+            label = "plate_number" if k == "plate" else k
+            old_val = before.get(k if k != "plate" else "plate")
+            if old_val != new_val:
+                diffs[label] = {"old": old_val, "new": new_val}
+
+        # ถ้ามีการเปลี่ยนเลขป้ายจริง ให้จดลง plate_edits แบบ pre-verify
+        if "plate" in mapped and before.get("plate") != mapped["plate"]:
+            reason = f"pre-verify edit (candidate_id={candidate_id})"
+            supabase_client.table("plate_edits").insert({
+                "id": str(uuid.uuid4()),
+                # plate_id ยังไม่ทราบตอนนี้ → ปล่อย NULL
+                "old_plate": before.get("plate"),
+                "new_plate": mapped["plate"],
+                "edited_by": current_user["user_id"],
+                "reason": reason
+            }).execute()
+
+        # เก็บ activity log
+        if diffs:
+            await log_activity(
+                user_id=current_user["user_id"],
+                action="edit_plate_candidate",
+                description=json.dumps({
+                    "candidate_id": candidate_id,
+                    "changes": diffs
+                }, ensure_ascii=False),
+                ip=request.client.host if request and request.client else None,
+                user_agent=request.headers.get("user-agent") if request else None
+            )
 
         return {
             "message": "Updated successfully",
