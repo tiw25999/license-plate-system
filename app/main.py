@@ -7,6 +7,7 @@ from app.routes.auth import auth_router
 import uvicorn
 import logging
 import time
+import os
 from dotenv import load_dotenv
 from slowapi.extension import Limiter
 from slowapi.middleware import SlowAPIMiddleware
@@ -29,13 +30,20 @@ limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_middleware(SlowAPIMiddleware)
 
-# ตั้ง CORS
+# ===== CORS =====
+# ใช้ ENV CORS_ORIGINS คั่นด้วยคอมมา เช่น:
+# CORS_ORIGINS=https://your-frontend.onrender.com,http://localhost:3000
+cors_origins_env = os.getenv("CORS_ORIGINS", "")
+allow_origins = [o.strip() for o in cors_origins_env.split(",") if o.strip()]
+if not allow_origins:
+    # fallback ให้ dev ใช้ได้ ถ้ายังไม่ตั้ง ENV
+    allow_origins = [
+        "http://localhost:3000",
+    ]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://license-plate-web-production.up.railway.app",
-        "http://localhost:3000"
-    ],
+    allow_origins=allow_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -48,7 +56,9 @@ async def add_process_time_header(request: Request, call_next):
     response = await call_next(request)
     elapsed = time.time() - start
     response.headers["X-Process-Time"] = str(elapsed)
-    logger.info(f"Path: {request.url.path} | Method: {request.method} | Time: {elapsed:.4f}s")
+    logger.info(
+        f"Path: {request.url.path} | Method: {request.method} | Time: {elapsed:.4f}s"
+    )
     return response
 
 @app.get("/health")
@@ -73,4 +83,5 @@ def read_root():
     return {"message": "License Plate API กำลังทำงาน"}
 
 if __name__ == "__main__":
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
+    port = int(os.getenv("PORT", "8000"))
+    uvicorn.run("app.main:app", host="0.0.0.0", port=port, reload=True)
